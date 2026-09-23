@@ -1,0 +1,2958 @@
+package com.kachat.app.viewmodels
+
+import android.app.Activity
+import android.app.PendingIntent
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.util.Log
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import com.kachat.app.models.BackupRetention
+import com.kachat.app.models.ContactEntity
+import com.kachat.app.models.Conversation
+import com.kachat.app.models.MessageEntity
+import com.kachat.app.models.ReactionEntity
+import com.kachat.app.models.displayName
+import com.kachat.app.repository.GroupConversation
+import com.kachat.app.services.ChatHistoryExportImportService
+import com.kachat.app.services.KnsProfileFields
+import com.kachat.app.services.KnsService
+import com.kachat.app.services.NextcloudFile
+import com.kachat.app.services.NextcloudService
+import com.kachat.app.services.SystemContactsSyncService
+import com.kachat.app.services.VoiceRecorderService
+import com.kachat.app.util.ImageMessage
+import com.kachat.app.util.ImagePrep
+import com.kachat.app.util.MessageReaction
+import com.kachat.app.util.MessageReply
+import com.kachat.app.util.VoiceMessage
+import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.util.Locale
+import javax.inject.Inject
+import com.kachat.app.repository.isExpiredSystemMessage
+import kotlinx.coroutines.flow.flow
+
+@HiltViewModel
+class ChatViewModel @Inject constructor(
+    @ApplicationContext private val appContext: Context,
+    private val chatRepository: com.kachat.app.repository.ChatRepository,
+    private val networkService: com.kachat.app.services.NetworkService,
+    private val walletManager: com.kachat.app.services.WalletManager,
+    private val settings: com.kachat.app.repository.AppSettingsRepository,
+    private val walletService: com.kachat.app.services.WalletService,
+    private val notificationHelper: com.kachat.app.services.NotificationHelper,
+    private val knsService: KnsService,
+    private val systemContactsSyncService: SystemContactsSyncService,
+    private val chatHistoryExportImportService: ChatHistoryExportImportService,
+    private val diagnosticsExportService: com.kachat.app.services.DiagnosticsExportService,
+    private val voiceRecorderService: VoiceRecorderService,
+    private val nextcloudService: NextcloudService,
+    private val nextcloudSyncService: com.kachat.app.services.NextcloudSyncService,
+    private val callService: com.kachat.app.services.CallService,
+    private val backupRestoreCoordinator: com.kachat.app.services.BackupRestoreCoordinator,
+    private val groupRepository: com.kachat.app.repository.GroupRepository,
+    private val shareShortcutsManager: com.kachat.app.services.ShareShortcutsManager,
+    private val paymentPoolService: com.kachat.app.services.PaymentPoolService,
+    private val addressActivityNotifier: com.kachat.app.services.AddressActivityNotifier,
+    private val kaPostsService: com.kachat.app.services.KaPostsService,
+    private val onboardingGate: com.kachat.app.services.OnboardingGate,
+    private val callableContactsExporter: com.kachat.app.services.CallableContactsExporter
+) : ViewModel() {
+
+    // ---------------------------------------------------------------------
+    // Onboarding sync hold
+    // ---------------------------------------------------------------------
+
+    /** Which phase the post-wizard initial sync is in, for its progress sheet. Null when idle. */
+    enum class InitialSyncPhase(val label: String) {
+        Messages("Downloading message history"),
+        Groups("Syncing your group chats"),
+        Balance("Checking your balance"),
+        Finished("Finished"),
+    }
+
+    private val _initialSyncPhase = MutableStateFlow<InitialSyncPhase?>(null)
+    val initialSyncPhase: StateFlow<InitialSyncPhase?> = _initialSyncPhase.asStateFlow()
+
+    val onboardingSyncHeld: StateFlow<Boolean> get() = onboardingGate.held
+
+    fun holdSyncForOnboarding() = onboardingGate.hold()
+
+    /**
+     * Lifts the wizard's hold and runs the account's first full sync, publishing a phase as it
+     * goes. Everything was deferred until now, so this is where all of that work happens - and a
+     * half-populated chat list invites taps on chats whose history has not arrived.
+     */
+    fun runInitialSyncAfterOnboarding() {
+        if (!onboardingGate.isHeld) return
+        onboardingGate.release()
+        viewModelScope.launch {
+            try {
+                _initialSyncPhase.value = InitialSyncPhase.Messages
+                chatRepository.syncMessages()
+                _initialSyncPhase.value = InitialSyncPhase.Groups
+                groupRepository.syncGroups()
+                _initialSyncPhase.value = InitialSyncPhase.Balance
+                walletService.refreshBalance()
+            } catch (e: Exception) {
+                Log.w("ChatViewModel", "Initial sync after onboarding failed", e)
+            } finally {
+                _initialSyncPhase.value = InitialSyncPhase.Finished
+            }
+        }
+    }
+
+    fun clearInitialSyncPhase() { _initialSyncPhase.value = null }
+
+    /** Lifts a hold with no wizard behind it, so the account can never be stranded unsynced. */
+    fun releaseOnboardingHoldIfIdle() {
+        if (onboardingGate.isHeld) onboardingGate.release()
+    }
+
+    /** Own-address balance-change events (see AddressActivityNotifier.utxoActivityEvents) — the
+     *  payment composer's Available pill refreshes off these when the current spending address
+     *  is involved, e.g. when a rotation change lands after a private-mode send. */
+    val ownAddressUtxoActivityEvents = addressActivityNotifier.utxoActivityEvents
+
+    /** Suppresses a notification for whichever contact's thread is currently open. */
+    fun setActiveContact(contactId: String?) {
+        notificationHelper.setActiveContact(contactId)
+        // Opening a chat is one of the two moments the recency order the share sheet shows can
+        // change — keep the direct-share conversation shortcuts current. refresh() diffs against
+        // what's already published, so this is free when nothing changed.
+        if (contactId != null) {
+            shareShortcutsManager.refresh(conversations.value)
+            // Fresh-address payment pools: lazily offer our pool once per established contact,
+            // and top up our stored pool of theirs if it has run low (both throttled/marker-
+            // guarded inside the service) — the Android equivalent of iOS's enterConversation
+            // hook. Fire-and-forget on the service's own scope.
+            paymentPoolService.onConversationOpened(contactId)
+        }
+    }
+
+    /** Suppresses a notification for whichever group's thread is currently open, and (via
+     *  `GroupRepository`'s `isViewingGroup` check) keeps it marked read in real time so a message
+     *  arriving while you're actively looking at it doesn't tick the unread badge up. */
+    fun setActiveGroup(groupId: String?) {
+        notificationHelper.setActiveGroup(groupId)
+    }
+
+    /** True only when the chatting (identity) address balance is a *confirmed* 0 KAS — never
+     *  while it's still unknown/loading. `WalletService.balanceKnown` gates the balance flow's
+     *  0L initial placeholder, so a cold launch can't flash the gate before the first fetch
+     *  lands. Drives ChatThreadScreen's 1:1 zero-balance funding gate (dimmed composer +
+     *  "fund your chatting address" card); group chats and broadcasts don't read it. */
+    val chattingBalanceGateActive: StateFlow<Boolean> =
+        combine(walletService.balance, walletService.balanceKnown) { balanceSompi, known ->
+            known && balanceSompi == 0L
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+
+    /** Re-fetches the chatting-address balance backing [chattingBalanceGateActive] — fired when
+     *  a 1:1 thread opens, and polled while the funding gate is showing so a gift claim or an
+     *  external deposit dismisses the gate without leaving the screen (nothing else pushes a
+     *  balance update into WalletService while the user just sits on the thread). */
+    fun refreshChattingBalance() {
+        viewModelScope.launch { walletService.refreshBalance() }
+    }
+
+
+
+    val kaspaExplorer: StateFlow<com.kachat.app.models.KaspaExplorer> = settings.kaspaExplorer
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(), com.kachat.app.models.KaspaExplorer.default)
+
+    fun updateKaspaExplorer(explorer: com.kachat.app.models.KaspaExplorer) {
+        viewModelScope.launch { settings.setKaspaExplorer(explorer) }
+    }
+
+    val revealedPhotoTxIds: StateFlow<Set<String>> = settings.revealedPhotoTxIds
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(), emptySet())
+
+    /** Permanently reveals a photo bubble that was hidden behind "Show Photo", by txId. */
+    fun revealPhoto(txId: String) {
+        viewModelScope.launch { settings.revealPhoto(txId) }
+    }
+
+    /** Per-contact override for the "Photos" picker in Chat Info — null clears back to Automatic. */
+    fun updateContactPhotoOverride(contactId: String, override: com.kachat.app.models.PhotoAutoDisplayMode?) {
+        viewModelScope.launch {
+            val existing = getOrCreateContact(contactId)
+            chatRepository.addContact(existing.copy(photoAutoDisplayOverride = override?.name))
+        }
+    }
+
+    /** Per-contact override for the "Incoming Notifications" picker in Chat Info — null clears back to Default. */
+    fun updateContactNotificationOverride(contactId: String, override: com.kachat.app.models.ContactNotificationMode?) {
+        viewModelScope.launch {
+            val existing = getOrCreateContact(contactId)
+            chatRepository.addContact(existing.copy(notificationOverride = override?.name))
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Calls (Nextcloud Talk over the 1:1 channel) - see CallService.
+    // -------------------------------------------------------------------------
+
+    /** The live call, if any; the thread hides its call button while one is up. */
+    val callSession: StateFlow<com.kachat.app.services.CallService.ActiveCall?> = callService.session
+
+    val callLastError: StateFlow<String?> = callService.lastError
+
+    fun startCall(contact: ContactEntity, video: Boolean) = callService.startCall(contact, video)
+
+    /** "Allow calls and video calls" for one contact - Chat Info's switch and the prompt behind
+     *  the call button. OFF by default: while off, this contact's invites and requests are
+     *  ignored on this device (silently, no reply). Per contact, this device only. */
+    fun setCallsEnabled(contactId: String, enabled: Boolean) {
+        viewModelScope.launch {
+            val existing = getOrCreateContact(contactId)
+            chatRepository.addContact(existing.copy(callsEnabled = if (enabled) true else null))
+            // The phone contact's card gains or loses "KaChat call" with the switch, so it never
+            // offers a call this device would ignore.
+            exportCallableContacts()
+        }
+    }
+
+    /**
+     * Puts "KaChat call" and "KaChat video call" on the card of every phone contact a callable
+     * KaChat contact is linked to, and takes them off everyone else's. Off the main thread: it
+     * walks the phone's contacts database.
+     */
+    private fun exportCallableContacts() {
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { callableContactsExporter.sync(chatRepository.getContacts().first()) }
+                .onFailure { android.util.Log.w("ChatViewModel", "Could not update contact cards: ${it.message}") }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Chat history export/import — matches iOS's plaintext JSON archive, scoped to whichever
+    // account is active. Export hands a file off to the share sheet; import always merges,
+    // never wipes existing local data.
+    // -------------------------------------------------------------------------
+
+    enum class ChatHistoryOpStatus { IDLE, IN_PROGRESS, SUCCESS, FAILED }
+    data class ChatHistoryOpState(val status: ChatHistoryOpStatus = ChatHistoryOpStatus.IDLE, val message: String? = null)
+
+    private val _exportState = MutableStateFlow(ChatHistoryOpState())
+    val exportState: StateFlow<ChatHistoryOpState> = _exportState.asStateFlow()
+
+    private val _importState = MutableStateFlow(ChatHistoryOpState())
+    val importState: StateFlow<ChatHistoryOpState> = _importState.asStateFlow()
+
+    /** Builds the export file, then hands its content:// URI to [onReady] (the caller launches the share sheet — that's a UI concern, not this ViewModel's). */
+    fun exportChatHistory(onReady: (Uri) -> Unit) {
+        if (_exportState.value.status == ChatHistoryOpStatus.IN_PROGRESS) return
+        viewModelScope.launch {
+            _exportState.value = ChatHistoryOpState(status = ChatHistoryOpStatus.IN_PROGRESS)
+            try {
+                // Off the main thread: building the archive serializes + AES-encrypts the entire
+                // chat history (megabytes for long histories) and writes the file — viewModelScope
+                // alone would run all of that on Main and freeze the UI for the duration.
+                val uri = withContext(Dispatchers.IO) { chatHistoryExportImportService.exportChatHistory() }
+                _exportState.value = ChatHistoryOpState(status = ChatHistoryOpStatus.SUCCESS)
+                onReady(uri)
+            } catch (e: Exception) {
+                Log.e("ChatViewModel", "Chat history export failed", e)
+                _exportState.value = ChatHistoryOpState(status = ChatHistoryOpStatus.FAILED, message = e.message ?: "Export failed")
+            }
+        }
+    }
+
+    private val _diagnosticsExportState = MutableStateFlow(ChatHistoryOpState())
+    val diagnosticsExportState: StateFlow<ChatHistoryOpState> = _diagnosticsExportState.asStateFlow()
+
+    /** Builds the diagnostics zip, then hands its content:// URI to [onReady] — see DiagnosticsExportService. */
+    fun exportDiagnostics(onReady: (Uri) -> Unit) {
+        if (_diagnosticsExportState.value.status == ChatHistoryOpStatus.IN_PROGRESS) return
+        viewModelScope.launch {
+            _diagnosticsExportState.value = ChatHistoryOpState(status = ChatHistoryOpStatus.IN_PROGRESS)
+            try {
+                // Zip assembly is file I/O — keep it off Main (same reasoning as exportChatHistory).
+                val uri = withContext(Dispatchers.IO) { diagnosticsExportService.exportDiagnostics() }
+                _diagnosticsExportState.value = ChatHistoryOpState(status = ChatHistoryOpStatus.SUCCESS)
+                onReady(uri)
+            } catch (e: Exception) {
+                Log.e("ChatViewModel", "Diagnostics export failed", e)
+                _diagnosticsExportState.value = ChatHistoryOpState(status = ChatHistoryOpStatus.FAILED, message = e.message ?: "Export failed")
+            }
+        }
+    }
+
+    fun importChatHistory(uri: Uri) {
+        if (_importState.value.status == ChatHistoryOpStatus.IN_PROGRESS) return
+        viewModelScope.launch {
+            _importState.value = ChatHistoryOpState(status = ChatHistoryOpStatus.IN_PROGRESS)
+            try {
+                // Decrypt + full-archive Gson parse are CPU-heavy; keep them off Main. The Room
+                // inserts inside are suspend and safe either way.
+                val result = withContext(Dispatchers.IO) { chatHistoryExportImportService.importChatHistory(uri) }
+                _importState.value = ChatHistoryOpState(
+                    status = ChatHistoryOpStatus.SUCCESS,
+                    message = "Imported ${result.importedMessageCount} messages from ${result.conversationCount} chats."
+                )
+            } catch (e: Exception) {
+                Log.e("ChatViewModel", "Chat history import failed", e)
+                _importState.value = ChatHistoryOpState(status = ChatHistoryOpStatus.FAILED, message = e.message ?: "Import failed")
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Cloud backup — Nextcloud only. Message retention is a device-level setting (see the
+    // Storage hub), and the restore coordinator owns cloud restores end to end.
+    // -------------------------------------------------------------------------
+
+    val backupRetention: StateFlow<BackupRetention> = settings.backupRetention
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(), BackupRetention.FOREVER)
+
+    /**
+     * The singleton that owns cloud restores (Nextcloud) end to end — exposed so the storage
+     * screens can observe its phase/progress and render the blocking full-screen modal. The
+     * restore job lives on the coordinator's own scope, NOT viewModelScope: this viewmodel is
+     * nav-entry scoped on the storage pages, and popping the screen must never cancel a
+     * half-written import.
+     */
+    val restoreCoordinator: com.kachat.app.services.BackupRestoreCoordinator get() = backupRestoreCoordinator
+
+    fun setBackupRetention(retention: BackupRetention) {
+        viewModelScope.launch { settings.setBackupRetention(retention) }
+    }
+
+    // -------------------------------------------------------------------------
+    // Nextcloud — the same JSON archive + merge logic as local export/import, with the user's
+    // own Nextcloud server (WebDAV) as the transport. The service itself is exposed so the
+    // settings section and picker composables can read account state / list folders / mint
+    // share links directly; the archive-touching operations stay here.
+    // -------------------------------------------------------------------------
+
+    val nextcloud: NextcloudService get() = nextcloudService
+
+    /** When the active wallet's archive last synced to Nextcloud automatically, null = never. */
+    val nextcloudLastAutoSyncMs: StateFlow<Long?> = nextcloudSyncService.lastAutoSyncMs
+
+    /** The Automatic Sync toggle (the pre-existing per-account auto-backup switch, upgraded).
+     *  Routed through the sync service so turning it on marks the archive dirty and prompts the
+     *  first sync, and turning it off drops any pending debounced upload. */
+    fun setNextcloudAutoSyncEnabled(enabled: Boolean) {
+        nextcloudSyncService.setAutoSyncEnabled(enabled)
+    }
+
+    private val _nextcloudConnectState = MutableStateFlow(ChatHistoryOpState())
+    val nextcloudConnectState: StateFlow<ChatHistoryOpState> = _nextcloudConnectState.asStateFlow()
+
+    fun connectNextcloud(server: String, username: String, appPassword: String) {
+        if (_nextcloudConnectState.value.status == ChatHistoryOpStatus.IN_PROGRESS) return
+        viewModelScope.launch {
+            _nextcloudConnectState.value = ChatHistoryOpState(status = ChatHistoryOpStatus.IN_PROGRESS)
+            try {
+                nextcloudService.connect(server, username, appPassword)
+                _nextcloudConnectState.value = ChatHistoryOpState(status = ChatHistoryOpStatus.SUCCESS)
+                refreshNextcloudBackupInfo()
+            } catch (e: Exception) {
+                Log.e("ChatViewModel", "Nextcloud connect failed", e)
+                _nextcloudConnectState.value = ChatHistoryOpState(status = ChatHistoryOpStatus.FAILED, message = e.message ?: "Could not connect")
+            }
+        }
+    }
+
+    fun disconnectNextcloud() {
+        nextcloudService.disconnect()
+        _nextcloudConnectState.value = ChatHistoryOpState()
+        _nextcloudBackupState.value = ChatHistoryOpState()
+        _nextcloudBackupInfo.value = null
+    }
+
+    private val _nextcloudBackupState = MutableStateFlow(ChatHistoryOpState())
+    val nextcloudBackupState: StateFlow<ChatHistoryOpState> = _nextcloudBackupState.asStateFlow()
+
+    /** Mirrors [backupNow], with the user's own Nextcloud server as the destination. */
+    fun nextcloudBackupNow() {
+        if (_nextcloudBackupState.value.status == ChatHistoryOpStatus.IN_PROGRESS) return
+        viewModelScope.launch {
+            _nextcloudBackupState.value = ChatHistoryOpState(status = ChatHistoryOpStatus.IN_PROGRESS)
+            try {
+                // Merges with whatever is already on the server (and aborts without uploading if
+                // that file can't be read or belongs to another wallet) — see runBackup.
+                val etag = nextcloudService.runBackup { remote -> chatHistoryExportImportService.buildBackupJson(remote) }
+                // Own-write guard for the automatic change watcher: this manual upload must not
+                // read as "another device changed the file" on the next ETag poll.
+                nextcloudSyncService.noteOwnUpload(etag)
+                _nextcloudBackupState.value = ChatHistoryOpState(status = ChatHistoryOpStatus.SUCCESS, message = "Backed up just now")
+                refreshNextcloudBackupInfo()
+            } catch (e: Exception) {
+                Log.e("ChatViewModel", "Nextcloud backup failed", e)
+                _nextcloudBackupState.value = ChatHistoryOpState(status = ChatHistoryOpStatus.FAILED, message = e.message ?: "Backup failed")
+            }
+        }
+    }
+
+    /** Manual only — never triggered automatically. Hands the whole restore to
+     *  [restoreCoordinator]. */
+    fun restoreFromNextcloud() {
+        backupRestoreCoordinator.startNextcloudRestore()
+    }
+
+    private val _nextcloudBackupInfo = MutableStateFlow<NextcloudFile?>(null)
+    val nextcloudBackupInfo: StateFlow<NextcloudFile?> = _nextcloudBackupInfo.asStateFlow()
+
+    /** The backup file's server-side date + size for the settings "last backup" line — null means none found (or not connected). */
+    fun refreshNextcloudBackupInfo() {
+        viewModelScope.launch {
+            _nextcloudBackupInfo.value = if (nextcloudService.isConnected) nextcloudService.fetchBackupInfo() else null
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Storage — mirrors iOS's "Local storage used" readout in Settings.
+    // -------------------------------------------------------------------------
+
+    private val _localStorageSizeBytes = MutableStateFlow<Long?>(null)
+    val localStorageSizeBytes: StateFlow<Long?> = _localStorageSizeBytes.asStateFlow()
+
+    /** Room's `kachat.db` file (+ `-wal`/`-shm` sidecars in WAL mode) on local disk — free, no network. */
+    fun refreshLocalStorageSize() {
+        val dbFile = appContext.getDatabasePath("kachat.db")
+        var total = dbFile.length()
+        for (suffix in listOf("-wal", "-shm")) {
+            val sidecar = java.io.File(dbFile.parentFile, dbFile.name + suffix)
+            if (sidecar.exists()) total += sidecar.length()
+        }
+        _localStorageSizeBytes.value = total
+    }
+
+    // -------------------------------------------------------------------------
+    // Danger Zone — matches iOS's three destructive settings actions exactly in scope
+    // (SettingsView.swift:216-295): all three act on the currently active account only, never
+    // other saved accounts on the device.
+    // -------------------------------------------------------------------------
+
+    enum class DangerZoneOpStatus { IDLE, IN_PROGRESS, SUCCESS, FAILED }
+    data class DangerZoneOpState(val status: DangerZoneOpStatus = DangerZoneOpStatus.IDLE, val message: String? = null)
+
+    /**
+     * "Wipe and Re-sync Incoming Messages" — deletes received messages (all chats when
+     * [contactIds] is null, otherwise just the selected 1:1 conversations), then re-fetches
+     * their history from the blockchain. The whole flow is handed to [restoreCoordinator],
+     * which owns the job in its own scope and drives the same blocking progress modal as a
+     * backup restore — sent messages, contacts, and the wallet's keys are untouched.
+     */
+    fun wipeAndResyncIncomingMessages(contactIds: List<String>?) {
+        backupRestoreCoordinator.startIncomingResync(contactIds)
+    }
+
+    private val _wipeAccountState = MutableStateFlow(DangerZoneOpState())
+    val wipeAccountState: StateFlow<DangerZoneOpState> = _wipeAccountState.asStateFlow()
+
+    /**
+     * Wipes all local chat data (messages + contacts) for [address]. [alsoDeleteCloud] is kept
+     * for the callers' shape; Nextcloud state is purged either way.
+     * Does NOT delete the wallet's keys — that's a separate, synchronous step
+     * ([WalletManager.deleteAccount] via [WalletViewModel.deleteWallet]) the caller must run via
+     * [onLocalWipeComplete] once this finishes, since key deletion and the resulting
+     * logged-in/logged-out state transition live in WalletViewModel, not here.
+     */
+    fun wipeAccountAndMessages(address: String, alsoDeleteCloud: Boolean, onLocalWipeComplete: () -> Unit) {
+        if (_wipeAccountState.value.status == DangerZoneOpStatus.IN_PROGRESS) return
+        viewModelScope.launch {
+            _wipeAccountState.value = DangerZoneOpState(status = DangerZoneOpStatus.IN_PROGRESS)
+            try {
+                chatRepository.wipeAllLocalDataForAddress(address)
+                groupRepository.clearAllLocalData(address)
+                // Both danger-zone entries to this flow delete the wallet itself right after the
+                // local wipe (onLocalWipeComplete -> deleteWallet), so the account's Nextcloud
+                // login and settings must go with it — mirrors iOS's purgeStoredState in the
+                // WalletManager account-deletion flows.
+                nextcloudService.purgeStoredState(address)
+                // The continuous Nextcloud sync state (dirty flag, last-synced stamp, restored
+                // marker) and any pending debounced upload go with the account too.
+                nextcloudSyncService.purgeStoredState(address)
+                _wipeAccountState.value = DangerZoneOpState(status = DangerZoneOpStatus.SUCCESS)
+                onLocalWipeComplete()
+            } catch (e: Exception) {
+                Log.e("ChatViewModel", "Wipe account failed", e)
+                _wipeAccountState.value = DangerZoneOpState(status = DangerZoneOpStatus.FAILED, message = e.message ?: "Failed")
+            }
+        }
+    }
+
+    fun resetWipeAccountState() {
+        _wipeAccountState.value = DangerZoneOpState()
+    }
+
+    // Auto-created payment chats are always shown — no toggle to hide them.
+    val conversations: StateFlow<List<Conversation>> = combine(
+        chatRepository.getContacts(),
+        chatRepository.getLatestMessages(),
+        chatRepository.getUnreadCounts()
+    ) { contacts, latestMessages, unreadCounts ->
+        val latestByContact = latestMessages.associateBy { it.contactId }
+        val unreadByContact = unreadCounts.associateBy({ it.contactId }, { it.count })
+        contacts
+            .map { contact ->
+                Conversation(contact, latestByContact[contact.id], unreadByContact[contact.id] ?: 0)
+            }
+            // The auto-seeded self-chat contact (ChatRepository.syncMessages creates one for your
+            // own address on every sync so self-notes have a sweep target) only earns a chat-list
+            // row once it actually holds a message. Without this, every brand-new account showed
+            // one mystery conversation for its own (unrecognizable) address within seconds of
+            // creation. iOS behaves this way already: it seeds the self CONTACT but only lists
+            // conversations that have messages.
+            .filterNot { it.contact.id == it.contact.walletAddress && it.lastMessage == null }
+            .sortedByDescending { it.lastMessage?.blockTimestamp ?: 0L }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(), emptyList())
+
+    /**
+     * address -> cached KNS avatar URL, for group chat's per-sender avatars - group members are
+     * always saved contacts (created automatically when added to a group), so this reuses the
+     * same [com.kachat.app.models.ContactEntity.knsAvatarUrl] caching 1:1 chat avatars already
+     * rely on, rather than broadcast's separate anonymous-sender KNS lookup path.
+     */
+    val contactAvatarsByAddress: StateFlow<Map<String, String?>> = chatRepository.getContacts()
+        .map { contacts -> contacts.associateBy({ it.id }, { it.knsAvatarUrl }) }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyMap())
+
+    /**
+     * address -> cached device address-book photo URI, the fallback rendered wherever there's no
+     * KNS avatar (see [com.kachat.app.models.ContactEntity.systemContactPhotoUri]). Paired with
+     * [contactAvatarsByAddress] at every group-chat avatar call site so group members resolve
+     * through the same KNS -> device photo -> glyph chain the 1:1 screens use.
+     */
+    val contactPhotoUrisByAddress: StateFlow<Map<String, String?>> = chatRepository.getContacts()
+        .map { contacts -> contacts.associateBy({ it.id }, { it.systemContactPhotoUri }) }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyMap())
+
+    /** address -> live contact alias (KNS-resolved name or custom nickname), for group chat's sender labels - see [contactAvatarsByAddress]. */
+    val contactAliasesByAddress: StateFlow<Map<String, String>> = chatRepository.getContacts()
+        .map { contacts -> contacts.mapNotNull { c -> c.alias?.takeIf { it.isNotBlank() }?.let { c.id to it } }.toMap() }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyMap())
+
+    /** contactId -> that conversation's newest reaction, for the chat list's "Reacted to your/
+     *  their message" preview when it's more recent than the last real message - a separate flow
+     *  (not folded into [Conversation]) since reactions never become messages, mirroring how
+     *  [contactAvatarsByAddress]/[contactAliasesByAddress] are already kept alongside
+     *  [conversations] rather than inside it. */
+    val latestReactionByContact: StateFlow<Map<String, com.kachat.app.services.database.LatestReactionRow>> =
+        chatRepository.getLatestReactions()
+            .map { rows -> rows.associateBy { it.contactId } }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyMap())
+
+    /** Group sibling of [latestReactionByContact]: groupId -> that group's newest reaction, for
+     *  the Group Chats tab's "Alice reacted to a message" card preview when it's more recent than
+     *  the last real message. */
+    val latestReactionByGroup: StateFlow<Map<String, com.kachat.app.services.database.LatestGroupReactionRow>> =
+        groupRepository.getLatestGroupReactions()
+            .map { rows -> rows.associateBy { it.groupId } }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyMap())
+
+    /**
+     * Fetches KNS name + avatar for every member of a group - group rosters cache a `displayName`
+     * snapshot taken at add/join time (`GroupMember.displayName`), which never reflects a KNS name
+     * resolved afterward, so the thread/info screens call this on appear the same way
+     * [refreshKnsNamesForAllContacts] runs for the chat list. `refreshKnsProfile` works for any
+     * address (creates no contact row itself), so this is safe even for members added by address/QR
+     * with no KNS domain.
+     */
+    fun refreshKnsProfilesForGroupMembers(addresses: List<String>) {
+        refreshKnsNamesForAllContacts()
+        for (address in addresses) {
+            refreshKnsProfile(address)
+            viewModelScope.launch {
+                val explicitPrimary = knsService.getExplicitPrimaryDomain(address)
+                _groupMemberPrimaryKnsByAddress.update { it + (address to explicitPrimary) }
+            }
+        }
+    }
+
+    fun markAsRead(contactId: String) {
+        viewModelScope.launch { chatRepository.markAsRead(contactId) }
+    }
+
+    fun markAsUnread(contactId: String) {
+        viewModelScope.launch { chatRepository.markAsUnread(contactId) }
+    }
+
+    /** Chat-list multi-select bulk actions. */
+    fun markContactsAsRead(contactIds: Collection<String>) {
+        viewModelScope.launch { contactIds.forEach { chatRepository.markAsRead(it) } }
+    }
+
+    fun markContactsAsUnread(contactIds: Collection<String>) {
+        viewModelScope.launch { contactIds.forEach { chatRepository.markAsUnread(it) } }
+    }
+
+    /** Permanently deletes the chat (contact + all local messages) — see ChatRepository.deleteChat. */
+    fun deleteChat(contactId: String) {
+        viewModelScope.launch { chatRepository.deleteChat(contactId) }
+    }
+
+    /** Multi-select bulk delete — mirrors markContactsAsRead/markContactsAsUnread's Collection shape. */
+    fun deleteChats(contactIds: Collection<String>) {
+        viewModelScope.launch { contactIds.forEach { chatRepository.deleteChat(it) } }
+    }
+
+    /** Deletes individual messages from this device only - local-only, never on-chain (the
+     *  recipient still has their own copy, and the underlying transaction is still permanently on
+     *  the blockchain). Used by ChatThreadScreen's message multi-select "Delete". */
+    fun deleteMessages(messageIds: Collection<String>) {
+        viewModelScope.launch { messageIds.forEach { chatRepository.deleteMessage(it) } }
+    }
+
+    /**
+     * Contacts whose Accept is currently building/submitting, and the last failure per contact.
+     *
+     * Accepting is an ON-CHAIN transaction and it can fail - most often on a brand new account
+     * where the 0.2 KAS the handshake itself delivered has not been seen as a spendable UTXO yet.
+     * This used to catch every exception into a log line and change nothing on screen, so a
+     * failure was indistinguishable from a dead button: the reported "I click accept and nothing
+     * happens". Decline is local-only, which is why it always appeared to work.
+     */
+    private val _handshakeAcceptInFlight = MutableStateFlow<Set<String>>(emptySet())
+    val handshakeAcceptInFlight: StateFlow<Set<String>> = _handshakeAcceptInFlight.asStateFlow()
+
+    private val _handshakeAcceptError = MutableStateFlow<Map<String, String>>(emptyMap())
+    val handshakeAcceptError: StateFlow<Map<String, String>> = _handshakeAcceptError.asStateFlow()
+
+    fun clearHandshakeAcceptError(contactId: String) {
+        _handshakeAcceptError.value = _handshakeAcceptError.value - contactId
+    }
+
+    /** Sends a real reciprocal handshake and activates the conversation. */
+    fun acceptHandshake(contactId: String) {
+        if (contactId in _handshakeAcceptInFlight.value) return
+        viewModelScope.launch {
+            _handshakeAcceptInFlight.value = _handshakeAcceptInFlight.value + contactId
+            _handshakeAcceptError.value = _handshakeAcceptError.value - contactId
+            try {
+                // The KAS that arrived WITH the handshake is what pays for the reply, and on a
+                // fresh account it landed seconds ago - refresh before building so the send is
+                // not rejected over a UTXO set the app simply had not caught up with.
+                runCatching { walletService.refreshBalance() }
+                walletService.acceptHandshake(contactId)
+            } catch (e: Exception) {
+                Log.e("ChatViewModel", "Error accepting handshake", e)
+                _handshakeAcceptError.value = _handshakeAcceptError.value +
+                    (contactId to (e.message?.takeIf { it.isNotBlank() } ?: "Could not accept. Try again."))
+            } finally {
+                _handshakeAcceptInFlight.value = _handshakeAcceptInFlight.value - contactId
+            }
+        }
+    }
+
+    private val _handshakeSendInFlight = MutableStateFlow<Set<String>>(emptySet())
+
+    /**
+     * Contact addresses with an outbound handshake currently being built/submitted. Lets every
+     * entry point into [sendHandshake] (the composer menu's "Send Handshake" row and the new-chat
+     * banner's button) show progress and refuse a double-tap without either of them owning the
+     * send itself — the transaction still goes out through the one path below.
+     */
+    val handshakeSendInFlight: StateFlow<Set<String>> = _handshakeSendInFlight.asStateFlow()
+
+    /** Manually starts a conversation by sending an initial handshake — the hand icon in a fresh chat. */
+    fun sendHandshake(contactId: String) {
+        if (contactId in _handshakeSendInFlight.value) return
+        viewModelScope.launch {
+            _handshakeSendInFlight.value = _handshakeSendInFlight.value + contactId
+            try {
+                walletService.sendHandshakeToNewContact(contactId)
+            } catch (e: Exception) {
+                Log.e("ChatViewModel", "Error sending handshake", e)
+            } finally {
+                _handshakeSendInFlight.value = _handshakeSendInFlight.value - contactId
+            }
+        }
+    }
+
+    /** Purely local — no transaction sent. Declining fully deletes the contact (see [deleteChat]) — the same as any other delete, they'd need a fresh handshake to reach you again. */
+    fun declineHandshake(contactId: String) {
+        viewModelScope.launch { chatRepository.deleteChat(contactId) }
+    }
+
+    /**
+     * A broadcast sender viewed via "User Info" isn't necessarily a saved 1:1 contact yet — unlike
+     * [addContact] (the real "add/import" flow, with its primary-domain auto-fill side effect),
+     * this is just a bare local row so per-contact fields (name/photo/notification overrides,
+     * chosen KNS domain) have somewhere to persist to the first time one of them is edited.
+     */
+    /**
+     * Makes sure a contact row exists for [contactId] before opening their thread - a broadcast
+     * sender or a group member viewed through User Info may never have been one.
+     */
+    fun ensureContactExists(contactId: String) {
+        viewModelScope.launch { getOrCreateContact(contactId) }
+    }
+
+    private suspend fun getOrCreateContact(contactId: String): ContactEntity {
+        return chatRepository.getContact(contactId) ?: ContactEntity(
+            id = contactId,
+            walletAddress = walletManager.getAddress(),
+            alias = null,
+            knsName = null,
+            publicKeyHex = null
+        )
+    }
+
+    fun updateContactName(contactId: String, newName: String) {
+        viewModelScope.launch {
+            val existing = getOrCreateContact(contactId)
+            val updated = existing.copy(alias = if (newName.isBlank()) null else newName)
+            chatRepository.addContact(updated)
+        }
+    }
+
+    private val _isRefreshing = MutableStateFlow(false)
+    val isRefreshing: StateFlow<Boolean> = _isRefreshing.asStateFlow()
+
+    fun refreshChats() {
+        viewModelScope.launch {
+            _isRefreshing.value = true
+            try {
+                chatRepository.syncMessages()
+                // Group invites (gctl_root) otherwise only surface via the 15-min SyncWorker
+                // periodic job or the live block-scan - neither fires reliably for "just got
+                // invited, opened the app to check", unlike 1:1's syncMessages() above which
+                // already had this same on-demand path. Mirrors iOS's performCatchUpSync(),
+                // which always includes its group-control catch-up too.
+                groupRepository.syncGroups()
+                walletService.refreshBalance()
+            } catch (e: Exception) {
+                Log.e("ChatViewModel", "Error refreshing chats", e)
+            } finally {
+                _isRefreshing.value = false
+            }
+        }
+    }
+
+    /**
+     * Pull-to-refresh on the Group Chats tab: groups only, not the 1:1 sync and the balance the
+     * Chats tab's refresh also does. Pulling on a list of groups should ask about groups.
+     */
+    fun refreshGroups() {
+        viewModelScope.launch {
+            _isRefreshing.value = true
+            try {
+                groupRepository.syncGroups()
+            } catch (e: Exception) {
+                Log.e("ChatViewModel", "Error refreshing groups", e)
+            } finally {
+                _isRefreshing.value = false
+            }
+        }
+    }
+
+    // Messages/photos/voice notes are identity-address self-stashes; "Pay in Kaspa" sources
+    // from the spending address instead (see WalletManager's spending-address doc comment) —
+    // kept as two separate UTXO sets so the live fee preview below prices each correctly rather
+    // than one silently reusing the other's (possibly empty, possibly wrong-balance) UTXOs.
+    private val _currentUtxos = MutableStateFlow<List<com.kachat.app.services.UtxoEntry>>(emptyList())
+    val currentUtxos: StateFlow<List<com.kachat.app.services.UtxoEntry>> = _currentUtxos.asStateFlow()
+
+    private val _spendingUtxos = MutableStateFlow<List<com.kachat.app.services.UtxoEntry>>(emptyList())
+    // Exposed publicly (unlike the backing field) so the payment composer's "Max" button can mass/
+    // fee-estimate against the spending-chain UTXOs actually spent from, not the identity address's.
+    val spendingUtxos: StateFlow<List<com.kachat.app.services.UtxoEntry>> = _spendingUtxos.asStateFlow()
+
+    private val _paymentAmount = MutableStateFlow("")
+    val paymentAmount: StateFlow<String> = _paymentAmount.asStateFlow()
+
+    private val _messageText = MutableStateFlow("")
+    val messageText: StateFlow<String> = _messageText.asStateFlow()
+
+    private val _networkFeeRate = MutableStateFlow(com.kachat.app.util.KaspaMass.MINIMUM_FEE_RATE_SOMPI_PER_GRAM.toDouble()) // sompi per mass-gram
+    val networkFeeRate: StateFlow<Double> = _networkFeeRate.asStateFlow()
+
+    // User-adjustable override for a busy fee market — set via the composer's clickable fee pill.
+    // Applies to whatever's sent next (message/photo/voice/payment) and clears itself afterward so
+    // a stale manual bump doesn't silently carry over to an unrelated later send.
+    private val _feeRateOverride = MutableStateFlow<Long?>(null)
+    val feeRateOverride: StateFlow<Long?> = _feeRateOverride.asStateFlow()
+
+    fun setFeeRateOverride(rate: Long?) {
+        _feeRateOverride.value = rate
+    }
+
+    enum class VoiceRecordingStatus { IDLE, RECORDING }
+    data class VoiceRecordingState(val status: VoiceRecordingStatus = VoiceRecordingStatus.IDLE, val elapsedMs: Long = 0L)
+
+    private val _voiceRecordingState = MutableStateFlow(VoiceRecordingState())
+    val voiceRecordingState: StateFlow<VoiceRecordingState> = _voiceRecordingState.asStateFlow()
+
+    private val _pendingPhotoUri = MutableStateFlow<Uri?>(null)
+    /** A picked-but-not-yet-sent chat photo, staged for preview (thumbnail + fee) before the user confirms send. */
+    val pendingPhotoUri: StateFlow<Uri?> = _pendingPhotoUri.asStateFlow()
+
+    /**
+     * The photo or voice note being composed came from the "+" menu's on-chain rows. Those mean
+     * exactly what they say: the bytes go on chain even while "Send Media via Nextcloud" is on.
+     * Cleared when the attachment is sent or discarded; a recording started from the composer
+     * bar's own microphone resets the voice flag.
+     */
+    private var onChainPhotoRequested = false
+    private var onChainVoiceRequested = false
+    private var groupOnChainPhotoRequested = false
+    private var groupOnChainVoiceRequested = false
+
+    /** Whether the photo waiting in the composer is one the chain must carry. */
+    val photoGoesOnChain: Boolean get() = onChainPhotoRequested
+    val groupPhotoGoesOnChain: Boolean get() = groupOnChainPhotoRequested
+
+    fun setPendingPhoto(uri: Uri?, onChain: Boolean = false) {
+        onChainPhotoRequested = onChain && uri != null
+        _pendingPhotoUri.value = uri
+    }
+
+    fun cancelPendingPhoto() {
+        onChainPhotoRequested = false
+        _pendingPhotoUri.value = null
+    }
+
+    // Group chat's own photo-staging/voice-recording state - kept separate from the 1:1 fields
+    // above (rather than reused) since both screens share this same ViewModel instance and a
+    // photo staged on one screen bleeding into the other on a quick navigation would be a real bug.
+    private val _groupVoiceRecordingState = MutableStateFlow(VoiceRecordingState())
+    val groupVoiceRecordingState: StateFlow<VoiceRecordingState> = _groupVoiceRecordingState.asStateFlow()
+
+    private val _groupPendingPhotoUri = MutableStateFlow<Uri?>(null)
+    val groupPendingPhotoUri: StateFlow<Uri?> = _groupPendingPhotoUri.asStateFlow()
+
+    fun setGroupPendingPhoto(uri: Uri?, onChain: Boolean = false) {
+        groupOnChainPhotoRequested = onChain && uri != null
+        _groupPendingPhotoUri.value = uri
+    }
+
+    fun cancelGroupPendingPhoto() {
+        groupOnChainPhotoRequested = false
+        _groupPendingPhotoUri.value = null
+    }
+
+    /**
+     * The payload byte count to price the live fee preview off of: the real typed-text length
+     * while composing, a rough elapsed-time-based estimate of the final encoded/encrypted size
+     * while recording a voice message, or a rough estimate of the final wire size for a staged
+     * photo — same shape as [VoiceMessage.estimatedWirePayloadSize]: the real send always measures
+     * the actual encoded bytes exactly, this is only ever used for the live preview.
+     */
+    private val previewPayloadSize: Flow<Int> = combine(_messageText, voiceRecordingState, pendingPhotoUri, nextcloudService.mediaSendEnabled) { text, recording, photoUri, mediaSend ->
+        // Via Nextcloud, the chain only carries the ~100-byte share link regardless of media
+        // size — mirrors groupPreviewPayloadSize's identical branch.
+        val nextcloudMode = mediaSend && nextcloudService.isConnected
+        if (recording.status == VoiceRecordingStatus.RECORDING) {
+            if (nextcloudMode) NEXTCLOUD_LINK_PREVIEW_BYTES else VoiceMessage.estimatedWirePayloadSize(recording.elapsedMs)
+        } else if (photoUri != null) {
+            // Compressed image bytes -> inner base64 (+33%) -> JSON envelope overhead -> encryption
+            // + outer base64 (+33%) -- rough multiplier, calibrated the same way VoiceMessage's
+            // estimate is: never used for the real fee, only this live preview.
+            if (nextcloudMode) NEXTCLOUD_LINK_PREVIEW_BYTES else (ImagePrep.DEFAULT_CHAT_TARGET_BYTES * 1.33 * 1.33).toInt() + 150
+        } else {
+            text.toByteArray().size
+        }
+    }
+
+    private val utxosForFeeEstimate: Flow<Pair<List<com.kachat.app.services.UtxoEntry>, List<com.kachat.app.services.UtxoEntry>>> =
+        combine(_currentUtxos, _spendingUtxos) { identity, spending -> identity to spending }
+
+    val estimatedFeeSompi: StateFlow<Long?> = combine(paymentAmount, previewPayloadSize, utxosForFeeEstimate, _networkFeeRate, _feeRateOverride) { amount, textPayloadSize, utxosPair, networkRate, overrideRate ->
+        val rate = overrideRate?.toDouble() ?: networkRate
+        if (amount.isEmpty() && textPayloadSize == 0) return@combine null
+
+        val isPayment = amount.isNotEmpty()
+        val utxos = if (isPayment) utxosPair.second else utxosPair.first
+        val sompiNeeded = if (isPayment) {
+            (amount.toDoubleOrNull() ?: 0.0) * 100_000_000
+        } else {
+            0.0
+        }.toLong()
+        
+        var total = 0L
+        var count = 0
+        for (utxo in utxos) {
+            total += utxo.utxoEntry.amount
+            count++
+            if (total >= sompiNeeded + 1000) break // Buffer for fee
+        }
+        
+        if (total < sompiNeeded && isPayment) return@combine null
+        
+        val payloadSize = if (isPayment) "Sent $amount KAS".toByteArray().size else textPayloadSize
+
+        // Preview only — a payment gets 2 standard 34-byte P2PK outputs (recipient + change).
+        // A message (isPayment=false) is a zero-amount self-stash send, and KaspaWalletEngine
+        // skips the zero-value recipient output for those (a 0-value output is non-standard and
+        // gets rejected) — matches iOS's estimateContextualMessageFee, which also prices a
+        // message off a single output. Assuming 2 outputs here previously overpriced every
+        // message/voice/photo preview by a phantom output (~412 mass, ~0.0004 KAS at min rate).
+        val mass = com.kachat.app.util.KaspaMass.calculateMass(
+            numInputs = count.coerceAtLeast(1),
+            outputScriptLens = if (isPayment) listOf(34, 34) else listOf(34),
+            payloadSize = payloadSize
+        )
+        com.kachat.app.util.KaspaMass.calculateFee(mass, rate.toLong())
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(), null)
+
+    // -------------------------------------------------------------------------
+    // Group chat's own live fee preview - same KaspaMass calc as [estimatedFeeSompi] above, but
+    // sized for gcomm's wire format (see estimatedGroupWirePayloadSize) instead of 1:1's plain
+    // ECIES envelope. The composer's text field is local Compose state (unlike 1:1's ViewModel-
+    // owned messageText), so setGroupMessageText bridges it in via LaunchedEffect.
+    // -------------------------------------------------------------------------
+
+    private val _groupMessageText = MutableStateFlow("")
+
+    fun setGroupMessageText(text: String) {
+        _groupMessageText.value = text
+    }
+
+    /**
+     * Raw bytes -> gcomm wire size: for media (photo/audio), raw bytes -> base64 (+33%) in the
+     * JSON envelope (+150 bytes overhead) first; either way, that content is then ChaCha20-Poly1305
+     * encrypted (+16 byte tag) and the whole ciphertext is hex-encoded (2x) for the wire, plus a
+     * fixed ~370 bytes of hex-encoded overhead (blinded_group_id/sender_id/sender_pub/msg_id/
+     * signature) that 1:1's plain-ECIES envelope doesn't carry. Matches iOS's
+     * GroupChatService.estimatedGroupWirePayloadSize. Preview only - the real send measures exactly.
+     */
+    private fun estimatedGroupWirePayloadSize(rawBytes: Int, isMediaEnvelope: Boolean): Int {
+        val innerBytes = if (isMediaEnvelope) (rawBytes * 1.33).toInt() + 150 else rawBytes
+        val ciphertextHexBytes = (innerBytes + 16) * 2
+        return ciphertextHexBytes + 370
+    }
+
+    /** Raw encoded-Opus-bytes/sec for [VoiceRecorderService]'s fixed 6kbps/48kHz config (bitrate/8 + WebM container overhead) - same heuristic as iOS's matching estimate for the same encoder settings. */
+    private fun estimatedGroupAudioRawBytes(elapsedMs: Long): Int {
+        val elapsedSeconds = elapsedMs / 1000.0
+        return (elapsedSeconds * 1_150.0).toInt()
+    }
+
+    private val groupPreviewPayloadSize: Flow<Int> = combine(_groupMessageText, groupVoiceRecordingState, groupPendingPhotoUri, nextcloudService.mediaSendEnabled, nextcloudService.account) { text, recording, photoUri, mediaSendEnabled, account ->
+        // With "Send Media via Nextcloud" on (and connected), staged media goes out as just a
+        // short share-link text message (see sendPendingGroupPhoto/stopAndSendGroupVoiceRecording),
+        // so the fee pill prices a link-sized payload instead of the embedded media envelope.
+        val nextcloudMode = mediaSendEnabled && account != null
+        when {
+            recording.status == VoiceRecordingStatus.RECORDING && nextcloudMode -> estimatedGroupWirePayloadSize(NEXTCLOUD_LINK_PREVIEW_BYTES, isMediaEnvelope = false)
+            recording.status == VoiceRecordingStatus.RECORDING -> estimatedGroupWirePayloadSize(estimatedGroupAudioRawBytes(recording.elapsedMs), isMediaEnvelope = true)
+            photoUri != null && nextcloudMode -> estimatedGroupWirePayloadSize(NEXTCLOUD_LINK_PREVIEW_BYTES, isMediaEnvelope = false)
+            photoUri != null -> estimatedGroupWirePayloadSize(GROUP_PHOTO_TARGET_BYTES, isMediaEnvelope = true)
+            else -> estimatedGroupWirePayloadSize(text.toByteArray().size, isMediaEnvelope = false)
+        }
+    }
+
+    val groupEstimatedFeeSompi: StateFlow<Long?> = combine(groupPreviewPayloadSize, _currentUtxos, _networkFeeRate, _feeRateOverride) { payloadSize, utxos, networkRate, overrideRate ->
+        val rate = overrideRate?.toDouble() ?: networkRate
+        if (payloadSize <= 372) return@combine null // 370 fixed overhead + 2 for an empty ciphertext -> nothing actually staged/typed yet
+
+        var total = 0L
+        var count = 0
+        for (utxo in utxos) {
+            total += utxo.utxoEntry.amount
+            count++
+            if (total >= 1000) break
+        }
+
+        val mass = com.kachat.app.util.KaspaMass.calculateMass(
+            numInputs = count.coerceAtLeast(1),
+            outputScriptLens = listOf(34),
+            payloadSize = payloadSize
+        )
+        com.kachat.app.util.KaspaMass.calculateFee(mass, rate.toLong())
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(), null)
+
+    /** Synchronous mass-based fee estimate (sompi) for ONE group control tx of the given payload
+     *  size, using the current network fee rate — mirrors [groupEstimatedFeeSompi]'s math. Lets the
+     *  group-info confirmations show the on-chain cost of an action before committing. */
+    fun estimateGroupControlTxFeeSompi(payloadBytes: Int): Long {
+        val rate = _feeRateOverride.value?.toDouble() ?: _networkFeeRate.value
+        var total = 0L; var count = 0
+        for (u in _currentUtxos.value) { total += u.utxoEntry.amount; count++; if (total >= 1000) break }
+        val mass = com.kachat.app.util.KaspaMass.calculateMass(
+            numInputs = count.coerceAtLeast(1), outputScriptLens = listOf(34), payloadSize = payloadBytes
+        )
+        return com.kachat.app.util.KaspaMass.calculateFee(mass, rate.toLong())
+    }
+
+    fun setMessageText(text: String) {
+        _messageText.value = text
+    }
+
+    fun setPaymentAmount(amount: String) {
+        _paymentAmount.value = amount
+    }
+
+    fun refreshUtxos() {
+        viewModelScope.launch {
+            try {
+                val address = walletManager.getAddress()
+                val api = networkService.kaspaRestApi.value ?: return@launch
+                
+                // Refresh fee rate from network
+                try {
+                    val feeInfo = api.getFeeEstimate()
+                    _networkFeeRate.value = feeInfo.normalBuckets.firstOrNull()?.feerate
+                        ?: com.kachat.app.util.KaspaMass.MINIMUM_FEE_RATE_SOMPI_PER_GRAM.toDouble()
+                } catch (e: Exception) {
+                    Log.w("ChatViewModel", "Could not fetch fee estimate, using network minimum")
+                }
+
+                _currentUtxos.value = api.getUtxos(address)
+            } catch (e: Exception) {
+                Log.w("ChatViewModel", "UTXO refresh failed", e)
+            }
+        }
+    }
+
+    /**
+     * Whether the ACTIVE account's Chats Payment Privacy toggle is on (default true) — drives the
+     * payment composer's funding-source display: which balance the Available pill shows, whether
+     * it's tappable, and which UTXO set the fee/Max estimators price against.
+     */
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    val chatsPaymentPrivacyOn: StateFlow<Boolean> = walletManager.activeAddressFlow
+        .flatMapLatest { address ->
+            if (address == null) kotlinx.coroutines.flow.flowOf(true) else settings.chatsPaymentPrivacyEnabled(address)
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), true)
+
+    /** True when the NEXT payment to the open contact would go to a fresh pool address the
+     *  contact shared — drives the subtle fresh-address arrow merged into the Available pill.
+     *  Refreshed on entering payment mode and after each send, matching iOS. */
+    private val _paysToFreshPoolAddress = MutableStateFlow(false)
+    val paysToFreshPoolAddress: StateFlow<Boolean> = _paysToFreshPoolAddress.asStateFlow()
+
+    fun refreshFreshPoolIndicator(contactId: String) {
+        viewModelScope.launch {
+            _paysToFreshPoolAddress.value = try {
+                paymentPoolService.willPayViaFreshPoolAddress(contactId)
+            } catch (e: Exception) {
+                false
+            }
+        }
+    }
+
+    /**
+     * Same as [refreshUtxos] but for the PAYMENT FUNDING SOURCE — the current spending address
+     * when Chats Payment Privacy is on, the chatting/identity address when off. The fee preview
+     * and the Max button both price against this set, so they always agree with what
+     * [sendPayment] will actually spend (estimators must use the same source the send uses).
+     */
+    /** Whether [spendingUtxos] were read from the primary spending address (Chats Payment
+     *  Privacy on) or the chatting address - the KaPosts tip sheet says which (iOS). */
+    private val _spendingUtxosFromSpendingAddress = MutableStateFlow(false)
+    val spendingUtxosFromSpendingAddress: StateFlow<Boolean> = _spendingUtxosFromSpendingAddress.asStateFlow()
+
+    fun refreshSpendingUtxos() {
+        viewModelScope.launch {
+            try {
+                val privacy = paymentPoolService.isChatsPrivacyEnabled()
+                _spendingUtxosFromSpendingAddress.value = privacy
+                val address = if (privacy) {
+                    walletManager.currentSpendingAddress()
+                } else {
+                    walletManager.getAddress()
+                }
+                val api = networkService.kaspaRestApi.value ?: return@launch
+
+                try {
+                    val feeInfo = api.getFeeEstimate()
+                    _networkFeeRate.value = feeInfo.normalBuckets.firstOrNull()?.feerate
+                        ?: com.kachat.app.util.KaspaMass.MINIMUM_FEE_RATE_SOMPI_PER_GRAM.toDouble()
+                } catch (e: Exception) {
+                    Log.w("ChatViewModel", "Could not fetch fee estimate, using network minimum")
+                }
+
+                _spendingUtxos.value = api.getUtxos(address)
+            } catch (e: Exception) {
+                Log.w("ChatViewModel", "Spending UTXO refresh failed", e)
+            }
+        }
+    }
+
+    /**
+     * @param address Must always be a real kaspa: address — never a raw KNS domain
+     * string, since it's used as the contact's primary key everywhere (sends,
+     * encryption, etc.). Resolve a domain to its owning address first (see
+     * [onCreateChatAddressChanged]) and pass the result here.
+     * @param knsName The domain name to display, if this contact was added via KNS.
+     */
+    // -------------------------------------------------------------------------
+    // Contacts picker (create-chat shortcuts)
+    // -------------------------------------------------------------------------
+
+    /**
+     * One person you can start a chat with: someone already in your address book, or someone
+     * from your KaPosts follow graph, or both.
+     */
+    data class PickerContact(
+        val address: String,
+        /** The contact's stored name, following [com.kachat.app.models.displayName]'s first two
+         *  tiers - null when nothing is stored and the row falls back to their KNS profile. */
+        val storedName: String?,
+        val youFollow: Boolean,
+        val followsYou: Boolean
+    )
+
+    private val _pickerContacts = MutableStateFlow<List<PickerContact>>(emptyList())
+    val pickerContacts: StateFlow<List<PickerContact>> = _pickerContacts.asStateFlow()
+
+    /** Starts true so create-chat renders the section on first frame; the loader clears it. */
+    private val _isLoadingPickerContacts = MutableStateFlow(true)
+    val isLoadingPickerContacts: StateFlow<Boolean> = _isLoadingPickerContacts.asStateFlow()
+
+    private var pickerContactsLoaded = false
+
+    /**
+     * Everyone you could plausibly want to message: your address book first, so the list is
+     * useful on the first frame, then both follow lists for our own K identity merged in (along
+     * with the locally-stored follows the indexer may not have caught up on). A chat you had
+     * months ago is buried far down the chat list, so it belongs here next to the people you
+     * follow. Only our own address is dropped.
+     */
+    fun loadPickerContacts() {
+        if (pickerContactsLoaded) return
+        pickerContactsLoaded = true
+        viewModelScope.launch {
+            val myAddress = walletManager.getAddress()
+            val storedNames = chatRepository.getContacts().first()
+                .filter { it.id != myAddress }
+                .associate { it.id to (it.alias ?: it.knsName) }
+            publishPickerContacts(storedNames, storedNames.keys, emptySet(), emptySet())
+            _isLoadingPickerContacts.value = false
+
+            val youFollow = (settings.kapostsFollowing(myAddress).first()).toMutableSet()
+            val followsYou = mutableSetOf<String>()
+
+            for (wantFollowers in listOf(false, true)) {
+                val pubkey = runCatching { kaPostsService.requesterPubkey() }.getOrNull() ?: break
+                var cursor: String? = null
+                var pagesLeft = 5 // 500 accounts per direction, far beyond any real follow list
+                while (pagesLeft > 0) {
+                    pagesLeft--
+                    val page = runCatching {
+                        kaPostsService.fetchFollowListPage(pubkey, wantFollowers, 100, cursor)
+                    }.getOrNull() ?: break
+                    for (user in page.items) {
+                        val addr = com.kachat.app.services.KaPostsService
+                            .kaspaAddressFromPubkey(user.userPublicKey) ?: continue
+                        if (wantFollowers) followsYou.add(addr) else youFollow.add(addr)
+                    }
+                    if (!page.hasMore || page.cursor == null) break
+                    cursor = page.cursor
+                }
+            }
+
+            publishPickerContacts(
+                storedNames,
+                (storedNames.keys + youFollow + followsYou) - setOf(myAddress),
+                youFollow,
+                followsYou,
+            )
+
+            // Names and avatars for the rows, into the same profile map the preview card reads.
+            // Deliberately sequential and in this coroutine: `refreshKnsProfile` launches one
+            // coroutine per call, and a follow graph in the hundreds would fire that many KNS
+            // round trips at once. The list renders immediately and names fill in behind it.
+            for (connection in _pickerContacts.value) {
+                if (_knsProfiles.value.containsKey(connection.address)) continue
+                val assets = runCatching { knsService.getOwnedDomainsCached(connection.address) }
+                    .getOrNull().orEmpty()
+                val names = assets.mapNotNull { it.asset }
+                if (names.isEmpty()) {
+                    _knsProfiles.update { it + (connection.address to KnsProfileUiState()) }
+                    continue
+                }
+                val explicitPrimary = runCatching {
+                    knsService.getExplicitPrimaryDomain(connection.address)
+                }.getOrNull()
+                val active = KnsService.pickActiveDomain(names, null, explicitPrimary ?: names.first())
+                val assetId = assets.firstOrNull { it.asset == active }?.assetId
+                val profile = assetId?.let { runCatching { knsService.getProfile(it) }.getOrNull() }
+                _knsProfiles.update {
+                    it + (connection.address to KnsProfileUiState(names, active, profile, explicitPrimary))
+                }
+            }
+        }
+    }
+
+    private fun publishPickerContacts(
+        storedNames: Map<String, String?>,
+        addresses: Set<String>,
+        youFollow: Set<String>,
+        followsYou: Set<String>,
+    ) {
+        _pickerContacts.value = addresses
+            .map {
+                PickerContact(
+                    address = it,
+                    storedName = storedNames[it],
+                    youFollow = it in youFollow,
+                    followsYou = it in followsYou,
+                )
+            }
+            .sortedBy { (it.storedName ?: it.address).lowercase() }
+    }
+
+    /**
+     * [deliberate]: the user typed the address in (Create Chat) - their own other accounts are
+     * allowed, only the account in use is refused (see ChatRepository.addContact). [onResult]
+     * gets the refusal reason, or null when the contact was stored, so the caller can say why
+     * where the user can see it instead of a tap that does nothing.
+     */
+    fun addContact(address: String, name: String?, knsName: String? = null, deliberate: Boolean = false, onResult: (String?) -> Unit = {}) {
+        viewModelScope.launch {
+            val existing = chatRepository.getContact(address)
+            val stored = if (existing != null) {
+                // If contact exists, update name if provided
+                val updated = existing.copy(
+                    alias = if (name.isNullOrBlank()) existing.alias else name,
+                    knsName = knsName ?: existing.knsName
+                )
+                chatRepository.addContact(updated, deliberate = deliberate)
+            } else {
+                val newContact = ContactEntity(
+                    id = address,
+                    walletAddress = walletManager.getAddress(),
+                    alias = if (name.isNullOrBlank()) null else name,
+                    knsName = knsName,
+                    publicKeyHex = null
+                )
+                chatRepository.addContact(newContact, deliberate = deliberate)
+            }
+            if (!stored) {
+                onResult(
+                    if (deliberate) "That is the account you are using - there is no one to talk to."
+                    else "That address is one of your own accounts."
+                )
+                return@launch
+            }
+            onResult(null)
+
+            // Added by raw address with no domain typed: record their primary KNS domain so
+            // `ContactEntity.displayName` can show it. It is deliberately NOT copied into
+            // `alias` — a contact is named only when the user names one, and a domain baked
+            // into the alias would go stale the moment the domain moved.
+            if (knsName == null) {
+                val primary = knsService.reverseResolve(address)
+                if (primary != null) {
+                    chatRepository.getContact(address)?.let { current ->
+                        chatRepository.addContact(current.copy(knsName = primary))
+                    }
+                }
+            }
+            refreshKnsProfile(address)
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Group chats
+    // -------------------------------------------------------------------------
+
+    val groups = groupRepository.getGroups()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    /**
+     * Groups with their latest message, for the Group Chats tab's list (mirrors [conversations]'
+     * shape for 1:1 chats). Group messages are stored encrypted, so this used to subscribe to
+     * every group's full message flow and decrypt all of it just to find the newest one and
+     * count unread - per group, on every database emission, on the main thread. It now reads
+     * [GroupRepository.getGroupSummary]: the count comes from SQL over the plaintext
+     * `isOutgoing`/`blockTimestamp` columns, and exactly one message is decrypted per group.
+     */
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    val groupConversations: StateFlow<List<GroupConversation>> = groups.flatMapLatest { groupList ->
+        if (groupList.isEmpty()) {
+            flowOf(emptyList())
+        } else {
+            combine(groupList.map { group ->
+                groupRepository.getGroupSummary(group.groupId, group.lastReadAt, group.isAdmin).map { summary ->
+                    GroupConversation(group, summary.latestMessage, summary.unreadCount)
+                }
+            }) { conversations -> conversations.sortedByDescending { it.lastMessage?.blockTimestamp ?: 0L } }
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    /**
+     * One-shot KNS resolve for a single group-member address row - unlike
+     * [onCreateChatAddressChanged]/[knsResolvedAddress] (single shared StateFlow, fine for the
+     * one-address Create Chat flow), the group member list can have up to 10 rows resolving
+     * concurrently, so each row owns its own debounce/resolving state locally in Compose and
+     * just calls this directly.
+     */
+    suspend fun resolveKnsDomain(domain: String): String? = knsService.resolve(domain)
+
+    private val _isCreatingGroup = MutableStateFlow(false)
+    val isCreatingGroup: StateFlow<Boolean> = _isCreatingGroup.asStateFlow()
+
+    private val _createGroupError = MutableStateFlow<String?>(null)
+    val createGroupError: StateFlow<String?> = _createGroupError.asStateFlow()
+
+    fun clearCreateGroupError() {
+        _createGroupError.value = null
+    }
+
+    /** Any address not already a contact is auto-added, matching [addContact]'s own-or-create behavior. */
+    fun createGroupChat(
+        name: String,
+        addresses: List<String>,
+        /** Compressed JPEG hex picked during creation - pushed once the group has an id. */
+        photoHex: String? = null,
+        onCreated: (String) -> Unit,
+    ) {
+        val trimmedName = name.trim()
+        val trimmedAddresses = addresses.map { it.trim() }.filter { it.isNotEmpty() }
+        if (trimmedName.isEmpty()) {
+            _createGroupError.value = "Enter a group name."
+            return
+        }
+        if (trimmedAddresses.isEmpty()) {
+            _createGroupError.value = "Add at least one address."
+            return
+        }
+        val invalid = trimmedAddresses.firstOrNull { !com.kachat.app.util.KaspaAddress.isValid(it) }
+        if (invalid != null) {
+            _createGroupError.value = "Invalid address: $invalid"
+            return
+        }
+
+        _isCreatingGroup.value = true
+        _createGroupError.value = null
+        viewModelScope.launch {
+            try {
+                val contacts = trimmedAddresses.map { address ->
+                    chatRepository.getContact(address) ?: ContactEntity(
+                        id = address,
+                        walletAddress = walletManager.getAddress(),
+                        alias = null,
+                        knsName = null,
+                        publicKeyHex = null
+                    ).also { chatRepository.addContact(it) }
+                }
+                val group = groupRepository.createGroup(trimmedName, contacts)
+                // Best effort: a failed photo send must not undo a group that was created
+                // successfully - the admin can set it again from Group Info.
+                if (!photoHex.isNullOrEmpty()) {
+                    runCatching { groupRepository.setGroupPhoto(group.groupId, photoHex) }
+                }
+                _isCreatingGroup.value = false
+                onCreated(group.groupId)
+            } catch (e: Exception) {
+                _isCreatingGroup.value = false
+                _createGroupError.value = e.message ?: "Failed to create group"
+            }
+        }
+    }
+
+    /**
+     * Ticks once a minute so expiring system lines drop out of an open thread on their own,
+     * rather than on the next unrelated emission.
+     */
+    private val systemLineClock = flow {
+        while (true) {
+            emit(System.currentTimeMillis())
+            kotlinx.coroutines.delay(60_000)
+        }
+    }
+
+    fun getGroupMessages(groupId: String) = groupRepository.getMessages(groupId)
+        .combine(groupHiddenMembers) { messages, hidden ->
+            messages.filter { it.senderAddress == null || "$groupId|${it.senderAddress}" !in hidden }
+        }
+        .combine(systemLineClock) { messages, now ->
+            // Membership/rename/photo lines are news only while they are recent.
+            messages.filterNot { it.isExpiredSystemMessage(now) }
+        }
+
+    /** Drops expired system lines from the database for one group - called when it is opened. */
+    fun pruneExpiredGroupSystemMessages(groupId: String) {
+        viewModelScope.launch {
+            runCatching { groupRepository.pruneExpiredSystemMessages(groupId) }
+        }
+    }
+
+    // The group message currently being replied to (long-press menu on its bubble to set this),
+    // shown as a banner above the compose field — cleared automatically once the reply sends.
+    // Mirrors [_replyingTo]'s shape for 1:1 chats.
+    private val _groupReplyingTo = MutableStateFlow<com.kachat.app.repository.GroupMessage?>(null)
+    val groupReplyingTo: StateFlow<com.kachat.app.repository.GroupMessage?> = _groupReplyingTo.asStateFlow()
+
+    fun startGroupReplyTo(message: com.kachat.app.repository.GroupMessage) {
+        _groupReplyingTo.value = message
+    }
+
+    fun cancelGroupReply() {
+        _groupReplyingTo.value = null
+    }
+
+    fun getGroupReactions(groupId: String) = groupRepository.getReactions(groupId)
+
+    /**
+     * Reacts to [targetTxId] with [emoji] ("add"), or removes this wallet's existing reaction on
+     * it ("remove"). Mirrors [sendReaction] for 1:1 chats - see [GroupRepository.sendGroupReaction].
+     */
+    fun sendGroupReaction(groupId: String, targetTxId: String, emoji: String, action: String) {
+        viewModelScope.launch {
+            try {
+                groupRepository.sendGroupReaction(targetTxId, groupId, emoji, action)
+            } catch (e: Exception) {
+                Log.e("ChatViewModel", "Error sending group reaction", e)
+            }
+        }
+    }
+
+    /** Retries a group reaction whose send previously failed - re-attempts the stored add/remove. */
+    fun retryGroupReaction(groupId: String, targetTxId: String, emoji: String, action: String) {
+        sendGroupReaction(groupId, targetTxId, emoji, action)
+    }
+
+    // -------------------------------------------------------------------------
+    // Group hide/mute/mentions-only - mirrors iOS's GroupChatService equivalents.
+    // -------------------------------------------------------------------------
+
+    val groupHiddenMembers: StateFlow<Set<String>> = settings.groupHiddenMembers
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptySet())
+    val groupMutedMembers: StateFlow<Set<String>> = settings.groupMutedMembers
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptySet())
+    val groupMentionsOnly: StateFlow<Set<String>> = settings.groupMentionsOnly
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptySet())
+    val groupSilent: StateFlow<Set<String>> = settings.groupSilent
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptySet())
+
+    fun isGroupMemberHidden(groupId: String, address: String) = "$groupId|$address" in groupHiddenMembers.value
+    fun isGroupMemberMuted(groupId: String, address: String) = "$groupId|$address" in groupMutedMembers.value
+    fun isGroupMentionsOnly(groupId: String) = groupId in groupMentionsOnly.value
+
+    /** Groups currently being force-refreshed, so the button can show progress and refuse a second tap. */
+    private val _refreshingGroupIds = MutableStateFlow<Set<String>>(emptySet())
+    val refreshingGroupIds: StateFlow<Set<String>> = _refreshingGroupIds.asStateFlow()
+
+    /**
+     * Live state for [refreshGroup]'s progress sheet: which group, what it is doing, and - once
+     * finished - how many messages the rebuild recovered. Null while idle.
+     */
+    data class GroupRefreshState(
+        val groupId: String,
+        val phase: com.kachat.app.repository.GroupRepository.GroupRefreshPhase?,
+        val recovered: Int? = null,
+        val rejections: com.kachat.app.repository.GroupRepository.GroupRefreshRejections? = null,
+    ) {
+        val label: String
+            get() = when (val p = phase) {
+                is com.kachat.app.repository.GroupRepository.GroupRefreshPhase.Invites -> "Re-reading your group invites"
+                is com.kachat.app.repository.GroupRepository.GroupRefreshPhase.Control -> "Re-reading roster and epoch keys"
+                is com.kachat.app.repository.GroupRepository.GroupRefreshPhase.Messages -> "Re-fetching messages (${p.done} of ${p.total} members)"
+                is com.kachat.app.repository.GroupRepository.GroupRefreshPhase.Rebuilding -> "Decrypting history"
+                null -> "Starting"
+            }
+    }
+
+    private val _groupRefreshState = MutableStateFlow<GroupRefreshState?>(null)
+    val groupRefreshState: StateFlow<GroupRefreshState?> = _groupRefreshState.asStateFlow()
+
+    fun clearGroupRefreshState() { _groupRefreshState.value = null }
+
+    /** Re-fetches one group from the start - see GroupRepository.forceRefreshGroup. */
+    fun refreshGroup(groupId: String) {
+        if (groupId in _refreshingGroupIds.value) return
+        viewModelScope.launch {
+            _refreshingGroupIds.value = _refreshingGroupIds.value + groupId
+            _groupRefreshState.value = GroupRefreshState(groupId, null)
+            try {
+                val recovered = groupRepository.forceRefreshGroup(groupId) { phase ->
+                    _groupRefreshState.value = GroupRefreshState(groupId, phase)
+                }
+                _groupRefreshState.value = GroupRefreshState(
+                    groupId, null, recovered = maxOf(0, recovered),
+                    rejections = groupRepository.lastRefreshRejections,
+                )
+            } catch (e: Exception) {
+                Log.w("ChatViewModel", "Group refresh failed", e)
+                _groupRefreshState.value = GroupRefreshState(groupId, null, recovered = 0)
+            } finally {
+                _refreshingGroupIds.value = _refreshingGroupIds.value - groupId
+            }
+        }
+    }
+
+    fun setGroupSilent(groupId: String, enabled: Boolean) {
+        viewModelScope.launch { settings.setGroupSilent(groupId, enabled) }
+    }
+
+    fun hideGroupMember(groupId: String, address: String) {
+        viewModelScope.launch { settings.hideGroupMember(groupId, address) }
+    }
+
+    fun unhideGroupMember(groupId: String, address: String) {
+        viewModelScope.launch { settings.unhideGroupMember(groupId, address) }
+    }
+
+    fun muteGroupMember(groupId: String, address: String) {
+        viewModelScope.launch { settings.muteGroupMember(groupId, address) }
+    }
+
+    fun unmuteGroupMember(groupId: String, address: String) {
+        viewModelScope.launch { settings.unmuteGroupMember(groupId, address) }
+    }
+
+    fun setGroupMentionsOnly(groupId: String, enabled: Boolean) {
+        viewModelScope.launch { settings.setGroupMentionsOnly(groupId, enabled) }
+    }
+
+    fun markGroupRead(groupId: String) {
+        viewModelScope.launch { groupRepository.markGroupRead(groupId) }
+    }
+
+    /** Bulk "Mark as Read" for multi-selected groups in the Group Chats tab — mirrors [markContactsAsRead]'s shape. */
+    fun markGroupsAsRead(groupIds: Collection<String>) {
+        viewModelScope.launch { groupIds.forEach { groupRepository.markGroupRead(it) } }
+    }
+
+    /** Bulk "Mark as Unread" for multi-selected groups in the Group Chats tab — mirrors [markContactsAsUnread]'s shape. */
+    fun markGroupsAsUnread(groupIds: Collection<String>) {
+        viewModelScope.launch { groupIds.forEach { groupRepository.markGroupUnread(it) } }
+    }
+
+    fun sendGroupMessage(text: String, groupId: String, onError: (String) -> Unit = {}) {
+        val reply = _groupReplyingTo.value
+        viewModelScope.launch {
+            try {
+                // If replying, wrap the content in the shared reply envelope (matches
+                // ChatViewModel.sendMessage/BroadcastViewModel's identical wrapping) so the
+                // quote survives even if the original message is later pruned.
+                val payload = if (reply != null) {
+                    val preview = VoiceMessage.parseOrNull(reply.content)?.let { "🎤 Audio message" }
+                        ?: ImageMessage.parseOrNull(reply.content)?.let { "📷 Photo" }
+                        ?: MessageReply.parseOrNull(reply.content)?.text
+                        ?: reply.content
+                    MessageReply.encode(replyToId = reply.txId, replyToSender = reply.senderAddress ?: "", replyToPreview = preview, text = text)
+                } else {
+                    text
+                }
+                groupRepository.sendGroupMessage(payload, groupId)
+                _groupReplyingTo.value = null
+            } catch (e: Exception) {
+                onError(e.message ?: "Failed to send")
+            }
+        }
+    }
+
+    fun addGroupMember(contact: ContactEntity, groupId: String, onResult: (Boolean, String?) -> Unit) {
+        viewModelScope.launch {
+            try {
+                groupRepository.addMember(contact, groupId)
+                onResult(true, null)
+            } catch (e: Exception) {
+                onResult(false, e.message)
+            }
+        }
+    }
+
+    /**
+     * Adds several members one at a time - each [GroupRepository.addMember] rotates the epoch and
+     * redistributes the new root, so they MUST run sequentially (a concurrent pair would both read
+     * the same current epoch and collide). Mirrors iOS's serial add loop. Reports how many were
+     * added and how many failed once the whole batch is done.
+     */
+    /**
+     * Takes addresses rather than contacts so someone who is not in the address book can still be
+     * invited: a group invite is encrypted to a public key decoded from the address itself, so
+     * there is no handshake or prior chat to require. Mints the contact on the way through,
+     * exactly as [createGroupChat] does for a brand-new group.
+     */
+    fun addGroupMembers(
+        addresses: List<String>,
+        groupId: String,
+        /**
+         * Fires as each member lands, so the UI can say which one it is on.
+         *
+         * Every added member rotates the epoch and sends two control transactions to EVERY
+         * member, so adding three people to a group of twelve is around eighty transactions,
+         * serialised, each waiting for the previous one's change to settle. That is minutes of
+         * real work behind what used to be a dialog with no progress and no way out - reported
+         * as the screen being stuck, and force-quitting mid-distribution is exactly how a group
+         * ends up with some members holding the new root and some the old.
+         */
+        onProgress: (done: Int, total: Int) -> Unit = { _, _ -> },
+        onResult: (added: Int, failed: Int) -> Unit,
+    ) {
+        viewModelScope.launch {
+            var added = 0
+            var failed = 0
+            onProgress(0, addresses.size)
+            for (address in addresses) {
+                try {
+                    val contact = chatRepository.getContact(address) ?: ContactEntity(
+                        id = address,
+                        walletAddress = walletManager.getAddress(),
+                        alias = null,
+                        knsName = null,
+                        publicKeyHex = null
+                    ).also { chatRepository.addContact(it) }
+                    groupRepository.addMember(contact, groupId)
+                    added++
+                } catch (e: Exception) { failed++ }
+                onProgress(added + failed, addresses.size)
+            }
+            onResult(added, failed)
+        }
+    }
+
+    fun removeGroupMember(member: com.kachat.app.models.GroupMember, groupId: String, onResult: (Boolean, String?) -> Unit) {
+        viewModelScope.launch {
+            try {
+                groupRepository.removeMember(member, groupId)
+                onResult(true, null)
+            } catch (e: Exception) {
+                onResult(false, e.message)
+            }
+        }
+    }
+
+    fun deleteGroupChat(groupId: String) {
+        viewModelScope.launch {
+            groupRepository.deleteGroup(groupId)
+        }
+    }
+
+    /** Multi-select bulk delete — mirrors markGroupsAsRead/markGroupsAsUnread's Collection shape. */
+    fun deleteGroupChats(groupIds: Collection<String>) {
+        viewModelScope.launch {
+            groupIds.forEach { groupRepository.deleteGroup(it) }
+        }
+    }
+
+    /** Deletes individual messages from a group, this device only - local-only, never on-chain.
+     *  Used by GroupChatThreadScreen's message multi-select "Delete". [groupId] isn't needed by
+     *  the delete itself (txId + wallet address alone identify a group message row) but is kept
+     *  in the signature to mirror deleteMessages(contactId:)'s 1:1 shape and leave room for a
+     *  future per-group scoping need without another signature change. */
+    fun deleteGroupMessages(groupId: String, messageIds: Collection<String>) {
+        viewModelScope.launch { groupRepository.deleteMessages(messageIds) }
+    }
+
+    fun renameGroup(groupId: String, newName: String, onError: (String) -> Unit = {}) {
+        viewModelScope.launch {
+            try {
+                groupRepository.renameGroup(groupId, newName)
+            } catch (e: Exception) {
+                onError(e.message ?: "Failed to rename group")
+            }
+        }
+    }
+
+    /** Re-broadcast the group invite to every member (admin) - retries invites that failed to send. */
+    fun resendGroupInvites(groupId: String, onResult: (String) -> Unit = {}) {
+        viewModelScope.launch {
+            try { groupRepository.resendInvites(groupId); onResult("Invites resent to all members.") }
+            catch (e: Exception) { onResult(e.message ?: "Failed to resend invites") }
+        }
+    }
+
+    /** Admin: set (photoHex = compressed-JPEG hex) or clear (photoHex = "") the group photo. */
+    fun setGroupPhoto(groupId: String, photoHex: String, onResult: (String?) -> Unit = {}) {
+        viewModelScope.launch {
+            try { groupRepository.setGroupPhoto(groupId, photoHex); onResult(null) }
+            catch (e: Exception) { onResult(e.message ?: "Failed to update group photo") }
+        }
+    }
+
+    /** Re-broadcast the group invite to ONE member (admin) - a targeted retry. */
+    fun resendGroupInviteToMember(groupId: String, address: String, onResult: (String) -> Unit = {}) {
+        viewModelScope.launch {
+            try { groupRepository.resendInviteToMember(groupId, address); onResult("Invite resent.") }
+            catch (e: Exception) { onResult(e.message ?: "Failed to resend invite") }
+        }
+    }
+
+    /**
+     * Group messages don't have an in-place "retry" record the way 1:1 does - resends the same
+     * content (works uniformly for text/photo/audio, since all three are just a content string)
+     * as a fresh message rather than mutating the failed one, which stays in history marked failed.
+     */
+    /** Re-sends a failed group message IN PLACE: the failed row is reused as the pending
+     *  placeholder and swapped for the real row, rather than a second bubble appearing next to
+     *  the failed one (see GroupRepository.sendGroupMessage's retryOfTxId). */
+    fun retryGroupMessage(groupId: String, content: String, failedTxId: String? = null) {
+        viewModelScope.launch {
+            try {
+                groupRepository.sendGroupMessage(content, groupId, retryOfTxId = failedTxId)
+            } catch (e: Exception) {
+                Log.e("ChatViewModel", "Error retrying group message", e)
+            }
+        }
+    }
+
+    /** "Donate" from Settings -> About: resolves the app's donation KNS domain and hands back its address so the caller can navigate straight into a chat, pre-armed to send a payment. */
+    fun startDonationChat(onResolved: (String) -> Unit, onError: () -> Unit) {
+        viewModelScope.launch {
+            val address = knsService.resolve(DONATION_KNS_DOMAIN)
+            if (address == null) {
+                onError()
+                return@launch
+            }
+            addContact(address = address, name = null, knsName = DONATION_KNS_DOMAIN)
+            onResolved(address)
+        }
+    }
+
+    data class KnsProfileUiState(
+        val ownedDomains: List<String> = emptyList(),
+        val selectedDomain: String? = null,
+        val profile: KnsProfileFields? = null,
+        /**
+         * The contact's REAL primary, straight from the reverse lookup, as distinct from
+         * [selectedDomain], which prefers a domain the user pinned for this chat. The Domains
+         * section marks this one, so it agrees with iOS and never presents a local preference,
+         * or the mere first domain owned, as the contact's own choice. Null when they have not
+         * set one.
+         */
+        val explicitPrimaryDomain: String? = null
+    )
+
+    private val _knsProfiles = MutableStateFlow<Map<String, KnsProfileUiState>>(emptyMap())
+    val knsProfiles: StateFlow<Map<String, KnsProfileUiState>> = _knsProfiles.asStateFlow()
+
+    /**
+     * Address -> their *explicitly-set* primary KNS domain, or null if they've never set one -
+     * unlike [knsProfiles]/[KnsService.reverseResolve], this does NOT fall back to "first owned
+     * domain". Drives group chat's @mention autocomplete (only members with an explicit primary
+     * are mentionable), populated by [refreshKnsProfilesForGroupMembers].
+     */
+    private val _groupMemberPrimaryKnsByAddress = MutableStateFlow<Map<String, String?>>(emptyMap())
+    val groupMemberPrimaryKnsByAddress: StateFlow<Map<String, String?>> = _groupMemberPrimaryKnsByAddress.asStateFlow()
+
+    /**
+     * address -> avatar URL for GROUP members. Group members are usually NOT saved contacts, so
+     * their avatar lives only in the address-keyed [knsProfiles] cache (fetched for every member by
+     * [refreshKnsProfilesForGroupMembers]), not in the contact-derived [contactAvatarsByAddress].
+     * Merge the two - contact-cached avatar wins, the KNS profile avatar fills in the rest - so
+     * group chats show avatars for every member like 1:1 does, instead of blank placeholders.
+     */
+    val groupMemberAvatarsByAddress: StateFlow<Map<String, String?>> =
+        combine(contactAvatarsByAddress, knsProfiles) { contacts, kns ->
+            val merged = contacts.toMutableMap()
+            for ((addr, state) in kns) {
+                val url = state.profile?.avatarUrl
+                if (!url.isNullOrBlank() && merged[addr].isNullOrBlank()) merged[addr] = url
+            }
+            merged
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyMap())
+
+    /**
+     * address -> display name for GROUP members, resolved with the same priority as 1:1:
+     * manual/contact alias first, then the member's KNS primary name (explicit primary, else the
+     * active KNS domain resolved into [knsProfiles]). So a non-contact member shows their KNS name
+     * instead of a raw address. A blank result falls through to the roster displayName / shortened
+     * address at the call site.
+     */
+    val groupMemberNamesByAddress: StateFlow<Map<String, String>> =
+        combine(contactAliasesByAddress, groupMemberPrimaryKnsByAddress, knsProfiles) { aliases, primaryKns, kns ->
+            val merged = aliases.toMutableMap()
+            for (addr in (primaryKns.keys + kns.keys)) {
+                if (!merged[addr].isNullOrBlank()) continue
+                val name = primaryKns[addr]?.takeIf { it.isNotBlank() }
+                    ?: kns[addr]?.selectedDomain?.takeIf { it.isNotBlank() }
+                if (name != null) merged[addr] = name
+            }
+            merged
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyMap())
+
+    /**
+     * Fetches this address's owned KNS domains + the active one's profile (avatar/bio/socials).
+     * Works for any address, not just a saved 1:1 contact — a broadcast sender viewed via "User
+     * Info" may never have a [ContactEntity] row at all, and their KNS profile should still show.
+     */
+    fun refreshKnsProfile(contactId: String) {
+        viewModelScope.launch {
+            val contact = chatRepository.getContact(contactId)
+            val ownedAssets = knsService.getOwnedDomains(contactId)
+            val ownedNames = ownedAssets.mapNotNull { it.asset }
+
+            if (ownedNames.isEmpty()) {
+                _knsProfiles.update { it + (contactId to KnsProfileUiState()) }
+                return@launch
+            }
+
+            // The real answer, before pickActiveDomain folds in the user's pinned choice.
+            val explicitPrimary = knsService.getExplicitPrimaryDomain(contactId)
+            val primary = explicitPrimary ?: ownedAssets.firstOrNull()?.asset
+            val activeName = KnsService.pickActiveDomain(ownedNames, contact?.knsName, primary)
+            val activeAsset = ownedAssets.firstOrNull { it.asset == activeName }
+            val profile = activeAsset?.assetId?.let { knsService.getProfile(it) }
+
+            _knsProfiles.update { it + (contactId to KnsProfileUiState(ownedNames, activeName, profile, explicitPrimary)) }
+
+            // Keep the chat list's cached avatar current — only meaningful for an actual saved contact.
+            if (contact != null && profile?.avatarUrl != contact.knsAvatarUrl) {
+                chatRepository.addContact(contact.copy(knsAvatarUrl = profile?.avatarUrl))
+            }
+        }
+    }
+
+    /**
+     * Records each contact's primary KNS domain, if they have one — matches iOS's
+     * fetchKNSDomainsForAllContacts, run whenever the chat list appears. It writes only
+     * `knsName`; `ContactEntity.displayName` reads it, so nothing here NAMES a contact.
+     * Never overwrites a real custom nickname the user typed in, never
+     * overwrites a contact linked to a system (phone) contact, and never overwrites a
+     * domain the user explicitly picked in Chat Info (tracked via `knsName` — once set,
+     * that choice is pinned until the user changes it themselves, even if the contact's
+     * on-chain primary is or becomes something else).
+     */
+    fun refreshKnsNamesForAllContacts(force: Boolean = false) {
+        // Debounced, and the stamp is PERSISTED. Every contact costs two uncached KNS calls
+        // (getPrimaryName, then assets-by-owner), and this runs whenever the chat list appears -
+        // so without a guard, opening the app walked the whole address book again every single
+        // time, including on a cold start seconds after the names were read from the database
+        // where they already live. An in-memory guard would still have re-walked on every
+        // launch, which is exactly the case worth stopping.
+        val prefs = appContext.getSharedPreferences("kns_sweep", Context.MODE_PRIVATE)
+        val last = prefs.getLong(KNS_NAME_SWEEP_KEY, 0L)
+        val now = System.currentTimeMillis()
+        if (!force && now - last < KNS_NAME_SWEEP_INTERVAL_MS) return
+        if (!knsNameSweepRunning.compareAndSet(false, true)) return
+        viewModelScope.launch {
+            try {
+            val contacts = chatRepository.getContacts().first()
+            for (contact in contacts) {
+                if (!canAutoUpdateAliasToDomain(contact.alias, contact.systemContactId, contact.knsName)) continue
+                val primary = knsService.reverseResolve(contact.id) ?: continue
+                if (primary != contact.knsName) {
+                    chatRepository.addContact(contact.copy(knsName = primary))
+                }
+            }
+            prefs.edit().putLong(KNS_NAME_SWEEP_KEY, System.currentTimeMillis()).apply()
+            } finally {
+                knsNameSweepRunning.set(false)
+            }
+        }
+    }
+
+    /**
+     * Fills in every chat's cached KNS avatar, in bounded-concurrency batches. Run whenever the
+     * chat list appears, alongside the name refresh - matches iOS's `preloadAvatarsForAllChats`.
+     *
+     * Without this the ONLY thing writing `knsAvatarUrl` was [refreshKnsProfile], which runs when
+     * you open a specific thread. So a freshly imported wallet showed initials for every chat
+     * until you had opened each one individually - the avatars were never missing, just never
+     * asked for.
+     *
+     * Skips contacts that already have one: this runs on every appearance, and re-resolving a
+     * cached avatar on each visit is a round trip per contact for an answer that rarely changes.
+     */
+    fun refreshKnsAvatarsForAllContacts() {
+        viewModelScope.launch {
+            val contacts = chatRepository.getContacts().first()
+            for (contact in contacts) {
+                // Skip ones that already have an avatar: this runs on every appearance, and
+                // re-resolving a cached answer per contact per visit is a round trip for
+                // something that rarely changes.
+                if (!contact.knsAvatarUrl.isNullOrBlank()) continue
+                val assets = try {
+                    knsService.getOwnedDomainsCached(contact.id)
+                } catch (e: Exception) {
+                    continue
+                }
+                if (assets.isEmpty()) continue
+                val primary = try { knsService.getExplicitPrimaryDomain(contact.id) } catch (e: Exception) { null }
+                // KnsAsset.asset is nullable on the wire, so filter rather than force it.
+                val names = assets.mapNotNull { it.asset }
+                if (names.isEmpty()) continue
+                val active = KnsService.pickActiveDomain(names, contact.knsName, primary ?: names.first())
+                val assetId = assets.firstOrNull { it.asset == active }?.assetId ?: continue
+                val avatar = try { knsService.getProfile(assetId)?.avatarUrl } catch (e: Exception) { null }
+                if (!avatar.isNullOrBlank() && avatar != contact.knsAvatarUrl) {
+                    chatRepository.addContact(contact.copy(knsAvatarUrl = avatar))
+                }
+            }
+        }
+    }
+
+    /** Links a chat to a phone contact picked via ActivityResultContracts.PickContact() — that name always wins over KNS auto-rename. */
+    fun linkSystemContact(contactId: String, lookupKey: String, displayName: String, photoUri: String? = null) {
+        viewModelScope.launch { chatRepository.linkSystemContact(contactId, lookupKey, displayName, source = "manual", photoUri = photoUri) }
+    }
+
+    fun unlinkSystemContact(contactId: String) {
+        viewModelScope.launch { chatRepository.unlinkSystemContact(contactId) }
+    }
+
+    val syncSystemContactsEnabled: StateFlow<Boolean> = settings.syncSystemContactsEnabled
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(), false)
+
+    val autoCreateSystemContactsEnabled: StateFlow<Boolean> = settings.autoCreateSystemContactsEnabled
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(), false)
+
+    fun setSyncSystemContactsEnabled(enabled: Boolean) {
+        viewModelScope.launch { settings.setSyncSystemContactsEnabled(enabled) }
+    }
+
+    /** Disabling Autocreate deletes only the shadow contacts this app created — any manually-linked real contact is untouched. */
+    fun setAutoCreateSystemContactsEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            settings.setAutoCreateSystemContactsEnabled(enabled)
+            if (!enabled) {
+                val contacts = chatRepository.getContacts().first()
+                for (contact in contacts.filter { it.systemContactLinkSource == "autoCreated" }) {
+                    contact.systemContactId?.let { systemContactsSyncService.deleteShadowContact(it) }
+                    chatRepository.unlinkSystemContact(contact.id)
+                }
+            }
+        }
+    }
+
+    /**
+     * Automatic system-contacts sync — matches iOS's SystemContactsService: scan for an
+     * embedded Kaspa address on any unlinked chat's phone contacts, link on exact match, and
+     * (if Autocreate is on) create a shadow phone contact for anything still unmatched. Run
+     * whenever the chat list appears, alongside the KNS name refresh.
+     */
+    fun syncSystemContacts() {
+        // Independent of the switches below: the rows follow "Allow calls" and the contact link,
+        // both of which can have changed since the last time the list was on screen.
+        exportCallableContacts()
+        viewModelScope.launch {
+            if (!settings.syncSystemContactsEnabled.first()) return@launch
+            if (!systemContactsSyncService.hasReadPermission()) return@launch
+
+            val allContacts = chatRepository.getContacts().first()
+
+            // Already-linked contacts: re-read their address-book photo so contacts linked before
+            // photos were stored get backfilled, and a photo changed on the phone follows through.
+            // ContentResolver work is deliberately off the main thread — this runs on every chat
+            // list appearance and a full address-book lookup per contact would jank the list.
+            val linked = allContacts.filter { it.systemContactId != null }
+            if (linked.isNotEmpty()) {
+                val refreshedPhotos = withContext(Dispatchers.IO) {
+                    linked.mapNotNull { contact ->
+                        val lookupKey = contact.systemContactId ?: return@mapNotNull null
+                        contact.id to systemContactsSyncService.photoUriForLookupKey(lookupKey)
+                    }
+                }
+                for ((contactId, photoUri) in refreshedPhotos) {
+                    chatRepository.updateSystemContactPhotoUri(contactId, photoUri)
+                }
+            }
+
+            val unlinked = allContacts.filter { it.systemContactId == null }
+            if (unlinked.isEmpty()) return@launch
+
+            val matches = withContext(Dispatchers.IO) {
+                systemContactsSyncService.findMatches(unlinked.map { it.id }.toSet())
+            }
+            for (contact in unlinked) {
+                val match = matches[contact.id] ?: continue
+                chatRepository.linkSystemContact(contact.id, match.lookupKey, match.displayName, source = "manual", photoUri = match.photoUri)
+            }
+
+            if (settings.autoCreateSystemContactsEnabled.first() && systemContactsSyncService.hasWritePermission()) {
+                for (contact in unlinked) {
+                    if (contact.id in matches) continue // just linked above
+                    val alias = contact.displayName
+                    val lookupKey = withContext(Dispatchers.IO) { systemContactsSyncService.createShadowContact(contact.id, alias) } ?: continue
+                    chatRepository.linkSystemContact(contact.id, lookupKey, alias, source = "autoCreated")
+                }
+            }
+        }
+    }
+
+    private val _knsResolvedAddress = MutableStateFlow<String?>(null)
+    val knsResolvedAddress: StateFlow<String?> = _knsResolvedAddress.asStateFlow()
+
+    private val _isResolvingKns = MutableStateFlow(false)
+    val isResolvingKns: StateFlow<Boolean> = _isResolvingKns.asStateFlow()
+
+    private val _knsError = MutableStateFlow<String?>(null)
+    val knsError: StateFlow<String?> = _knsError.asStateFlow()
+
+    private var knsResolveJob: Job? = null
+
+    /** Call on every keystroke in the Create Chat address field — debounces and resolves if the input looks like a KNS domain. */
+    fun onCreateChatAddressChanged(input: String) {
+        knsResolveJob?.cancel()
+        _knsResolvedAddress.value = null
+        _knsError.value = null
+
+        if (!KnsService.looksLikeDomain(input)) {
+            _isResolvingKns.value = false
+            return
+        }
+
+        _isResolvingKns.value = true
+        knsResolveJob = viewModelScope.launch {
+            delay(500)
+            val resolved = knsService.resolve(input)
+            _isResolvingKns.value = false
+            if (resolved != null) {
+                _knsResolvedAddress.value = resolved
+            } else {
+                _knsError.value = "KNS domain not found"
+            }
+        }
+    }
+
+    /**
+     * Sends an on-chain message via WalletService. Inserts a "pending" placeholder
+     * immediately (before the network call) so it shows up in the thread right away;
+     * on success that placeholder is swapped for the real message (real tx id), on
+     * failure it flips to "failed" in place and stays visible with a Retry option —
+     * matches iOS ChatService+Conversations' optimistic send flow.
+     */
+    // The message currently being replied to (double-tap on its bubble to set this), shown as a
+    // banner above the compose field — cleared automatically once the reply actually sends.
+    private val _replyingTo = MutableStateFlow<MessageEntity?>(null)
+    val replyingTo: StateFlow<MessageEntity?> = _replyingTo.asStateFlow()
+
+    fun startReplyTo(message: MessageEntity) {
+        _replyingTo.value = message
+    }
+
+    fun cancelReply() {
+        _replyingTo.value = null
+    }
+
+    fun sendMessage(contactId: String, text: String) {
+        if (text.isEmpty()) return
+        viewModelScope.launch { sendMessageAwait(contactId, text) }
+    }
+
+    /**
+     * The actual 1:1 send, awaitable and reporting success — [sendMessage] is the fire-and-forget
+     * wrapper every composer uses, while the share-sheet compose sheet needs the outcome so it can
+     * show progress/success and fall back to staging a draft when the send fails.
+     */
+    suspend fun sendMessageAwait(contactId: String, text: String): Boolean {
+        if (text.isEmpty()) return false
+        // Sending bumps this conversation to the top of the recency order the system share sheet
+        // mirrors — promote it explicitly since the conversations flow only reorders after the
+        // pending insert lands. Diffed inside refresh(), so repeat sends to the same top chat are free.
+        shareShortcutsManager.refresh(conversations.value, promoteContactId = contactId)
+        val reply = _replyingTo.value
+        val feeRate = _feeRateOverride.value
+        _feeRateOverride.value = null
+        run {
+            val pendingId = "pending_${java.util.UUID.randomUUID()}"
+            try {
+                val myAddress = walletManager.getAddress()
+                val payload = if (reply != null) {
+                    val preview = VoiceMessage.parseOrNull(reply.plaintextBody)?.let { "🎤 Audio message" }
+                        ?: ImageMessage.parseOrNull(reply.plaintextBody)?.let { "📷 Photo" }
+                        // Replying to a message that's itself a reply — unwrap to its actual text
+                        // rather than showing the inner reply's raw JSON as the preview.
+                        ?: MessageReply.parseOrNull(reply.plaintextBody)?.text
+                        ?: (reply.plaintextBody ?: "")
+                    val replyToSender = if (reply.direction == "sent") myAddress else contactId
+                    MessageReply.encode(replyToId = reply.id, replyToSender = replyToSender, replyToPreview = preview, text = text)
+                } else {
+                    text
+                }
+                chatRepository.insertMessage(
+                    MessageEntity(
+                        id = pendingId,
+                        contactId = contactId,
+                        walletAddress = myAddress,
+                        type = com.kachat.app.util.MessageProtocol.TYPE_COMM,
+                        direction = "sent",
+                        plaintextBody = payload,
+                        encryptedPayload = "",
+                        amountSompi = 0,
+                        blockTimestamp = System.currentTimeMillis(),
+                        deliveryStatus = "pending"
+                    )
+                )
+
+                // Encrypt + self-stash the message. Sending a message NEVER sends a handshake —
+                // handshakes are only ever sent by an explicit user tap (sendHandshakeToNewContact).
+                val result = walletService.sendKasiaMessage(contactId, payload, feeRateOverride = feeRate)
+
+                // Merge-aware finalize: if a backup mirror import inserted the txId row first,
+                // this merges into it (never a second copy) and always removes the placeholder.
+                chatRepository.finalizeProvisionalMessage(
+                    pendingId,
+                    MessageEntity(
+                        id = result.txId,
+                        contactId = contactId,
+                        walletAddress = myAddress,
+                        type = com.kachat.app.util.MessageProtocol.TYPE_COMM,
+                        direction = "sent",
+                        plaintextBody = payload,
+                        encryptedPayload = result.payloadHex,
+                        amountSompi = 0,
+                        blockTimestamp = System.currentTimeMillis(),
+                        deliveryStatus = "sent"
+                    )
+                )
+                _replyingTo.value = null
+                return true
+            } catch (e: Exception) {
+                Log.e("ChatViewModel", "Error sending message", e)
+                chatRepository.updateMessageStatus(pendingId, "failed")
+                return false
+            }
+        }
+    }
+
+    /**
+     * The share-sheet compose sheet's direct send: the (possibly edited) text first, then every
+     * shared image, each as its own message through the exact same 1:1 pipeline the composer uses
+     * (so Nextcloud media-send, photo quality presets, pending bubbles and delivery status all
+     * behave identically). Returns true only when every part went out — the sheet stages the text
+     * as a draft in that chat otherwise.
+     */
+    suspend fun sendSharedContent(contactId: String, text: String, imageUris: List<Uri>): Boolean {
+        var allOk = true
+        if (text.isNotBlank() && !sendMessageAwait(contactId, text)) allOk = false
+        for (uri in imageUris) {
+            val payload = prepareSharedImagePayload(uri)
+            if (payload == null || !sendMessageAwait(contactId, payload)) allOk = false
+        }
+        return allOk
+    }
+
+    /** The message payload for one shared image: a Nextcloud share link when media-send is on and
+     *  connected, otherwise the embedded on-chain [ImageMessage] envelope — the same two paths
+     *  [sendPendingPhoto] picks between, with the same on-failure fallback to on-chain. */
+    private suspend fun prepareSharedImagePayload(uri: Uri): String? {
+        if (nextcloudService.mediaSendEnabled.value && nextcloudService.isConnected) {
+            try {
+                return withContext(Dispatchers.IO) {
+                    val resolver = appContext.contentResolver
+                    val bytes = resolver.openInputStream(uri)?.use { it.readBytes() }
+                        ?: throw java.io.IOException("Could not read the shared photo.")
+                    val mimeType = resolver.getType(uri)?.takeIf { it.startsWith("image/") } ?: "image/jpeg"
+                    val extension = android.webkit.MimeTypeMap.getSingleton().getExtensionFromMimeType(mimeType) ?: "jpg"
+                    nextcloudService.uploadMediaAndShare(bytes, "photo_${System.currentTimeMillis()}.$extension", mimeType)
+                }
+            } catch (e: Exception) {
+                Log.w("ChatViewModel", "Nextcloud upload failed for shared photo, falling back to on-chain", e)
+            }
+        }
+        return try {
+            val prepared = withContext(Dispatchers.Default) {
+                ImagePrep.prepareForChatMessage(appContext, uri)
+            }
+            val base64 = android.util.Base64.encodeToString(prepared.bytes, android.util.Base64.NO_WRAP)
+            ImageMessage.encode(
+                fileName = prepared.fileName,
+                sizeBytes = prepared.bytes.size.toLong(),
+                base64Image = base64,
+                mimeType = prepared.mimeType
+            )
+        } catch (e: Exception) {
+            Log.e("ChatViewModel", "Error preparing shared photo", e)
+            null
+        }
+    }
+
+    /**
+     * Reacts to [targetTxId] with [emoji] ("add"), or removes the caller's existing reaction on
+     * it ("remove"). Unlike [sendMessage], this never creates a visible pending bubble - the
+     * reaction is applied to the local reactions table immediately (optimistic UI) and the actual
+     * send happens in the background via the same [WalletService.sendKasiaMessage] pipeline any
+     * other message uses.
+     */
+    /** [onError] gets the failure's reason. The pill already turns red with a Retry, but the
+     *  error itself was only logged, so a reaction failing instantly on every attempt gave
+     *  nothing to go on - the thread shows it in the same toast a failed send uses (iOS). */
+    fun sendReaction(contactId: String, targetTxId: String, emoji: String, action: String, onError: (String) -> Unit = {}) {
+        viewModelScope.launch {
+            val myAddress = walletManager.getAddress()
+            if (action == "add") {
+                // Optimistically pending (no icon) - flips to sent (green checkmark) once the send
+                // succeeds below, or failed (red error + Retry) in the catch.
+                chatRepository.upsertReaction(targetTxId, myAddress, contactId, emoji, null, System.currentTimeMillis(), deliveryStatus = "pending")
+            } else {
+                chatRepository.removeReaction(targetTxId, myAddress)
+            }
+            try {
+                val payload = MessageReaction.encode(targetTxId, emoji, action)
+                val result = walletService.sendKasiaMessage(contactId, payload)
+                if (action == "add") {
+                    chatRepository.upsertReaction(targetTxId, myAddress, contactId, emoji, result.txId, System.currentTimeMillis())
+                }
+            } catch (e: Exception) {
+                Log.e("ChatViewModel", "Reaction $action $emoji on ${targetTxId.take(12)} failed: ${e.message}", e)
+                // Flag failed so the pill shows the red error icon and a Retry appears under the
+                // message. A failed "remove" restores the optimistically-deleted reaction (marked
+                // failed) so it isn't silently lost; Retry re-attempts the change.
+                chatRepository.upsertReaction(targetTxId, myAddress, contactId, emoji, null, System.currentTimeMillis(), deliveryStatus = "failed", failedAction = action)
+                onError(e.message ?: "Reaction failed")
+            }
+        }
+    }
+
+    /** Retries a 1:1 reaction whose send previously failed - re-attempts the stored add/remove. */
+    fun retryReaction(contactId: String, targetTxId: String, emoji: String, action: String, onError: (String) -> Unit = {}) {
+        sendReaction(contactId, targetTxId, emoji, action, onError)
+    }
+
+    // -------------------------------------------------------------------------
+    // Chess — "Play Chess" 1:1 feature. Each action is just a JSON envelope (see ChessMessage.kt)
+    // sent through the exact same sendMessage() pipeline as text, the same way VoiceMessage/
+    // ImageMessage don't have their own send path either. `cancelReply()` first since these
+    // aren't things you'd ever want wrapped in an unrelated pending reply.
+    // -------------------------------------------------------------------------
+
+    /** Starting a new game always supersedes whichever one is currently active against this
+     *  contact - only one active chess game per contact is allowed, so an existing in-progress/
+     *  pending-response game is auto-resigned first rather than left orphaned alongside a second
+     *  one. Looks up the contact's messages fresh (rather than relying on a UI-side cache) so this
+     *  check is correct even right after the very latest message. */
+    fun startChessGame(contactId: String, tcMinutes: Int? = null, tcIncSeconds: Int? = null) {
+        cancelReply()
+        viewModelScope.launch {
+            val myAddress = walletManager.getAddress()
+            val messages = chatRepository.getMessages(contactId).first().map { entity ->
+                com.kachat.app.util.ChessGameEngine.SimpleChessSourceMessage(
+                    id = entity.id,
+                    plaintextBody = entity.plaintextBody,
+                    isOutgoing = entity.direction == "sent",
+                    blockTimestamp = entity.blockTimestamp
+                )
+            }
+            val existing = com.kachat.app.util.ChessGameEngine.activeGame(messages, myAddress, contactId)
+            if (existing != null) {
+                resignChessGame(contactId, existing.gameId)
+            }
+            val content = com.kachat.app.util.ChessInviteContent(
+                gameId = java.util.UUID.randomUUID().toString(),
+                inviterColor = if (kotlin.random.Random.nextBoolean()) com.kachat.app.util.ChessInviteColor.WHITE else com.kachat.app.util.ChessInviteColor.BLACK,
+                tcMinutes = tcMinutes,
+                tcIncSeconds = tcIncSeconds
+            )
+            sendMessage(contactId, com.kachat.app.util.ChessMessage.encode(content))
+        }
+    }
+
+    fun respondToChessInvite(contactId: String, gameId: String, accepted: Boolean) {
+        cancelReply()
+        val content = com.kachat.app.util.ChessResponseContent(gameId = gameId, accepted = accepted)
+        sendMessage(contactId, com.kachat.app.util.ChessMessage.encode(content))
+    }
+
+    /** `clockMs`: timed games only - the mover's remaining time in ms after this move, increment
+     *  already added (computed by ChessGameScreen from its local thinking-time accumulator). */
+    fun sendChessMove(contactId: String, gameId: String, move: com.kachat.app.util.ChessMove, clockMs: Long? = null) {
+        cancelReply()
+        val content = com.kachat.app.util.ChessMoveContent(
+            gameId = gameId,
+            from = move.from.algebraic,
+            to = move.to.algebraic,
+            promotion = move.promotion?.promotionLetter,
+            clockMs = clockMs
+        )
+        sendMessage(contactId, com.kachat.app.util.ChessMessage.encode(content))
+    }
+
+    /** `reason`: "timeout" when the local player flagged, null for a manual resign. */
+    fun resignChessGame(contactId: String, gameId: String, reason: String? = null) {
+        cancelReply()
+        val content = com.kachat.app.util.ChessResignContent(gameId = gameId, reason = reason)
+        sendMessage(contactId, com.kachat.app.util.ChessMessage.encode(content))
+    }
+
+    // -------------------------------------------------------------------------
+    // Voice messages — recorded as Opus-in-WebM, then sent through the exact same
+    // sendMessage() pipeline as text: the entire encoded audio is embedded as base64 in the
+    // message content JSON, encrypted, and put on-chain like any other message. No separate
+    // upload/transport, matching iOS.
+    // -------------------------------------------------------------------------
+
+    private var recordingTickerJob: Job? = null
+
+    /** Recording (not playback) needs Android 10+ — the mic button should be disabled below that. */
+    val voiceRecordingSupported: Boolean get() = voiceRecorderService.isSupported
+
+    fun startVoiceRecording(contactId: String, onChain: Boolean = false) {
+        onChainVoiceRequested = onChain
+        if (_voiceRecordingState.value.status == VoiceRecordingStatus.RECORDING) return
+        try {
+            voiceRecorderService.startRecording()
+        } catch (e: Exception) {
+            Log.e("ChatViewModel", "Could not start voice recording", e)
+            return
+        }
+        _voiceRecordingState.value = VoiceRecordingState(status = VoiceRecordingStatus.RECORDING)
+        val startedAt = System.currentTimeMillis()
+        // On-chain notes are payload-capped at 10s; a Nextcloud-uploaded note only needs to
+        // fit the server, so the ceiling relaxes to 10 minutes while the toggle is on.
+        val maxDurationMs = if (!onChainVoiceRequested && nextcloudService.mediaSendEnabled.value && nextcloudService.isConnected) {
+            VoiceRecorderService.MAX_NEXTCLOUD_RECORDING_DURATION_MS
+        } else {
+            VoiceRecorderService.MAX_RECORDING_DURATION_MS
+        }
+        recordingTickerJob = viewModelScope.launch {
+            while (isActive && _voiceRecordingState.value.status == VoiceRecordingStatus.RECORDING) {
+                val elapsed = System.currentTimeMillis() - startedAt
+                _voiceRecordingState.value = _voiceRecordingState.value.copy(elapsedMs = elapsed)
+                if (elapsed >= maxDurationMs) {
+                    stopAndSendVoiceRecording(contactId)
+                    break
+                }
+                delay(200)
+            }
+        }
+    }
+
+    /** Stops recording and sends it — unless it was too short to be a real message (a stray tap), in which case it's discarded silently, same as a cancel. */
+    fun stopAndSendVoiceRecording(contactId: String) {
+        // Read before it is cleared: what was asked for is what gets sent.
+        val onChainOnly = onChainVoiceRequested
+        onChainVoiceRequested = false
+        if (_voiceRecordingState.value.status != VoiceRecordingStatus.RECORDING) return
+        val elapsed = _voiceRecordingState.value.elapsedMs
+        recordingTickerJob?.cancel()
+        recordingTickerJob = null
+        _voiceRecordingState.value = VoiceRecordingState()
+
+        val file = voiceRecorderService.stopRecording()
+        if (file == null || elapsed < VoiceRecorderService.MIN_RECORDING_DURATION_MS) {
+            file?.delete()
+            return
+        }
+        sendVoiceMessage(contactId, file, onChainOnly)
+    }
+
+    fun cancelVoiceRecording() {
+        onChainVoiceRequested = false
+        recordingTickerJob?.cancel()
+        recordingTickerJob = null
+        _voiceRecordingState.value = VoiceRecordingState()
+        voiceRecorderService.cancelRecording()
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        // Avoid leaking a live MediaRecorder if the screen/ViewModel is torn down mid-recording.
+        if (_voiceRecordingState.value.status == VoiceRecordingStatus.RECORDING) {
+            voiceRecorderService.cancelRecording()
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Group chat photo/voice - same recording/compression pipeline as 1:1 above, routed through
+    // GroupRepository's sendGroupImage/sendGroupAudio (gcomm payload) instead of sendMessage.
+    // -------------------------------------------------------------------------
+
+    private var groupRecordingTickerJob: Job? = null
+
+    fun startGroupVoiceRecording(groupId: String, onChain: Boolean = false) {
+        groupOnChainVoiceRequested = onChain
+        if (_groupVoiceRecordingState.value.status == VoiceRecordingStatus.RECORDING) return
+        try {
+            voiceRecorderService.startRecording()
+        } catch (e: Exception) {
+            Log.e("ChatViewModel", "Could not start group voice recording", e)
+            return
+        }
+        _groupVoiceRecordingState.value = VoiceRecordingState(status = VoiceRecordingStatus.RECORDING)
+        val startedAt = System.currentTimeMillis()
+        // Same dynamic ceiling as 1:1's startVoiceRecording: on-chain group notes are
+        // payload-capped at 10s, but a Nextcloud-uploaded note only needs to fit the server,
+        // so the cap relaxes to 10 minutes while the toggle is on.
+        val maxDurationMs = if (!groupOnChainVoiceRequested && nextcloudService.mediaSendEnabled.value && nextcloudService.isConnected) {
+            VoiceRecorderService.MAX_NEXTCLOUD_RECORDING_DURATION_MS
+        } else {
+            VoiceRecorderService.MAX_RECORDING_DURATION_MS
+        }
+        groupRecordingTickerJob = viewModelScope.launch {
+            while (isActive && _groupVoiceRecordingState.value.status == VoiceRecordingStatus.RECORDING) {
+                val elapsed = System.currentTimeMillis() - startedAt
+                _groupVoiceRecordingState.value = _groupVoiceRecordingState.value.copy(elapsedMs = elapsed)
+                if (elapsed >= maxDurationMs) {
+                    stopAndSendGroupVoiceRecording(groupId)
+                    break
+                }
+                delay(200)
+            }
+        }
+    }
+
+    /** Group twin of the 1:1 [sendVoiceMessage] Nextcloud gate: with "Send Media via Nextcloud"
+     *  on (and an account connected), the recorded file (Opus-in-WebM, exactly as captured — no
+     *  re-encode, so the full relaxed-cap length ships byte-for-byte) uploads to the server and
+     *  the group message is just the public share link; any upload/share failure falls back to
+     *  the embedded on-chain gcomm envelope below, with a toast so the sender knows. */
+    fun stopAndSendGroupVoiceRecording(groupId: String) {
+        // Read before it is cleared: what was asked for is what gets sent.
+        val onChainOnly = groupOnChainVoiceRequested
+        groupOnChainVoiceRequested = false
+        if (_groupVoiceRecordingState.value.status != VoiceRecordingStatus.RECORDING) return
+        val elapsed = _groupVoiceRecordingState.value.elapsedMs
+        groupRecordingTickerJob?.cancel()
+        groupRecordingTickerJob = null
+        _groupVoiceRecordingState.value = VoiceRecordingState()
+
+        val file = voiceRecorderService.stopRecording()
+        if (file == null || elapsed < VoiceRecorderService.MIN_RECORDING_DURATION_MS) {
+            file?.delete()
+            return
+        }
+        viewModelScope.launch {
+            try {
+                val bytes = withContext(Dispatchers.IO) { file.readBytes() }
+                if (!onChainOnly && nextcloudService.mediaSendEnabled.value && nextcloudService.isConnected) {
+                    try {
+                        val extension = file.extension.ifEmpty { "webm" }
+                        val mimeType = when (extension.lowercase()) {
+                            "webm" -> "audio/webm"
+                            "ogg", "opus" -> "audio/ogg"
+                            "m4a", "mp4" -> "audio/mp4"
+                            else -> "application/octet-stream"
+                        }
+                        // The recorder already names files voice_<timestamp>.webm — keep that name.
+                        val url = nextcloudService.uploadMediaAndShare(bytes, file.name, mimeType)
+                        groupRepository.sendGroupMessage(url, groupId)
+                        return@launch
+                    } catch (e: Exception) {
+                        Log.w("ChatViewModel", "Nextcloud group voice upload failed, falling back to on-chain send", e)
+                        android.widget.Toast.makeText(appContext, "Nextcloud upload failed — sending voice message on-chain instead", android.widget.Toast.LENGTH_SHORT).show()
+                    }
+                }
+                groupRepository.sendGroupAudio(bytes, groupId, fileName = file.name)
+            } catch (e: Exception) {
+                Log.e("ChatViewModel", "Error sending group voice message", e)
+            } finally {
+                file.delete()
+            }
+        }
+    }
+
+    fun cancelGroupVoiceRecording() {
+        groupOnChainVoiceRequested = false
+        groupRecordingTickerJob?.cancel()
+        groupRecordingTickerJob = null
+        _groupVoiceRecordingState.value = VoiceRecordingState()
+        voiceRecorderService.cancelRecording()
+    }
+
+    /** Mirrors [sendPendingPhoto] for the group's own staged photo - smaller default target than 1:1's preset since group's `gcomm` payload hex-encodes the ciphertext (vs. 1:1's base64) plus extra fixed per-message fields, so the same raw photo lands as a noticeably larger on-chain payload.
+     *
+     *  Same Nextcloud gate as 1:1's [sendPendingPhoto]: with "Send Media via Nextcloud" on (and an
+     *  account connected), the ORIGINAL picked image uploads to the server at full quality and the
+     *  group message is just the public share link — recipients' link-preview cards render it as a
+     *  photo. Any upload/share failure falls back to the compressed on-chain gcomm envelope below,
+     *  with a toast so the sender knows. */
+    fun sendPendingGroupPhoto(groupId: String) {
+        val uri = _groupPendingPhotoUri.value ?: return
+        // Read before it is cleared: the send below runs after this returns.
+        val onChainOnly = groupOnChainPhotoRequested
+        _groupPendingPhotoUri.value = null
+        groupOnChainPhotoRequested = false
+        viewModelScope.launch {
+            if (!onChainOnly && nextcloudService.mediaSendEnabled.value && nextcloudService.isConnected) {
+                try {
+                    val url = withContext(Dispatchers.IO) {
+                        val resolver = appContext.contentResolver
+                        val bytes = resolver.openInputStream(uri)?.use { it.readBytes() }
+                            ?: throw java.io.IOException("Could not read the selected photo.")
+                        val mimeType = resolver.getType(uri)?.takeIf { it.startsWith("image/") } ?: "image/jpeg"
+                        val extension = android.webkit.MimeTypeMap.getSingleton().getExtensionFromMimeType(mimeType) ?: "jpg"
+                        nextcloudService.uploadMediaAndShare(bytes, "photo_${System.currentTimeMillis()}.$extension", mimeType)
+                    }
+                    groupRepository.sendGroupMessage(url, groupId)
+                    return@launch
+                } catch (e: Exception) {
+                    Log.w("ChatViewModel", "Nextcloud group photo upload failed, falling back to on-chain send", e)
+                    android.widget.Toast.makeText(appContext, "Nextcloud upload failed — sending photo on-chain instead", android.widget.Toast.LENGTH_SHORT).show()
+                }
+            }
+            try {
+                val prepared = withContext(Dispatchers.Default) { ImagePrep.prepareForChatMessage(appContext, uri, GROUP_PHOTO_TARGET_BYTES) }
+                groupRepository.sendGroupImage(prepared.bytes, groupId, fileName = prepared.fileName, mimeType = prepared.mimeType)
+            } catch (e: Exception) {
+                Log.e("ChatViewModel", "Error preparing group photo message", e)
+            }
+        }
+    }
+
+    /** Compresses and sends the currently staged [pendingPhotoUri] — clears the staged photo either way, matching the picker-cancel UX (a failed compression just drops back to the empty input bar, same as [sendVoiceMessage] logging and moving on rather than surfacing a dedicated error).
+     *
+     *  With "Send Media via Nextcloud" on (and an account connected), the ORIGINAL picked image
+     *  uploads to the server at full quality and the chat message is just the public share link —
+     *  the recipient's link preview renders it as a photo bubble. Any upload/share failure falls
+     *  back to the embedded on-chain envelope below, with a toast so the sender knows the photo
+     *  went on-chain (compressed) instead of via their server. 1:1 only — the group path
+     *  ([sendPendingGroupPhoto]) is untouched. */
+    fun sendPendingPhoto(contactId: String) {
+        val uri = _pendingPhotoUri.value ?: return
+        // Read before it is cleared: the send below runs after this returns.
+        val onChainOnly = onChainPhotoRequested
+        _pendingPhotoUri.value = null
+        onChainPhotoRequested = false
+        viewModelScope.launch {
+            if (!onChainOnly && nextcloudService.mediaSendEnabled.value && nextcloudService.isConnected) {
+                try {
+                    val url = withContext(Dispatchers.IO) {
+                        val resolver = appContext.contentResolver
+                        val bytes = resolver.openInputStream(uri)?.use { it.readBytes() }
+                            ?: throw java.io.IOException("Could not read the selected photo.")
+                        val mimeType = resolver.getType(uri)?.takeIf { it.startsWith("image/") } ?: "image/jpeg"
+                        val extension = android.webkit.MimeTypeMap.getSingleton().getExtensionFromMimeType(mimeType) ?: "jpg"
+                        nextcloudService.uploadMediaAndShare(bytes, "photo_${System.currentTimeMillis()}.$extension", mimeType)
+                    }
+                    sendMessage(contactId, url)
+                    return@launch
+                } catch (e: Exception) {
+                    Log.w("ChatViewModel", "Nextcloud photo upload failed, falling back to on-chain send", e)
+                    android.widget.Toast.makeText(appContext, "Nextcloud upload failed — sending photo on-chain instead", android.widget.Toast.LENGTH_SHORT).show()
+                }
+            }
+            try {
+                val prepared = withContext(Dispatchers.Default) { ImagePrep.prepareForChatMessage(appContext, uri) }
+                val base64 = android.util.Base64.encodeToString(prepared.bytes, android.util.Base64.NO_WRAP)
+                val json = ImageMessage.encode(fileName = prepared.fileName, sizeBytes = prepared.bytes.size.toLong(), base64Image = base64, mimeType = prepared.mimeType)
+                sendMessage(contactId, json)
+            } catch (e: Exception) {
+                Log.e("ChatViewModel", "Error preparing photo message", e)
+            }
+        }
+    }
+
+    /** With "Send Media via Nextcloud" on, the recorded file (Opus-in-WebM, exactly as captured —
+     *  no duration cap pressure from on-chain payload size) uploads to the server and the message
+     *  is the share link; any failure falls back to the embedded on-chain envelope with a toast.
+     *  1:1 only — the group voice path is untouched. */
+    private fun sendVoiceMessage(contactId: String, file: java.io.File, onChainOnly: Boolean) {
+        viewModelScope.launch {
+            try {
+                val bytes = withContext(Dispatchers.IO) { file.readBytes() }
+                if (!onChainOnly && nextcloudService.mediaSendEnabled.value && nextcloudService.isConnected) {
+                    try {
+                        val extension = file.extension.ifEmpty { "webm" }
+                        val mimeType = when (extension.lowercase()) {
+                            "webm" -> "audio/webm"
+                            "ogg", "opus" -> "audio/ogg"
+                            "m4a", "mp4" -> "audio/mp4"
+                            else -> "application/octet-stream"
+                        }
+                        // The recorder already names files voice_<timestamp>.webm — keep that name.
+                        val url = nextcloudService.uploadMediaAndShare(bytes, file.name, mimeType)
+                        sendMessage(contactId, url)
+                        return@launch
+                    } catch (e: Exception) {
+                        Log.w("ChatViewModel", "Nextcloud voice upload failed, falling back to on-chain send", e)
+                        android.widget.Toast.makeText(appContext, "Nextcloud upload failed — sending voice message on-chain instead", android.widget.Toast.LENGTH_SHORT).show()
+                    }
+                }
+                val base64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+                val json = VoiceMessage.encode(fileName = file.name, sizeBytes = bytes.size.toLong(), base64Audio = base64)
+                sendMessage(contactId, json)
+            } catch (e: Exception) {
+                Log.e("ChatViewModel", "Error preparing voice message", e)
+            } finally {
+                file.delete()
+            }
+        }
+    }
+
+    /** Re-attempts a failed message, reusing its same id/content — the same placeholder resurrected, not a new message. */
+    fun retrySendMessage(message: MessageEntity) {
+        val text = message.plaintextBody ?: return
+        viewModelScope.launch {
+            try {
+                chatRepository.updateMessageStatus(message.id, "pending")
+                val result = walletService.sendKasiaMessage(message.contactId, text)
+                chatRepository.finalizeProvisionalMessage(
+                    message.id,
+                    MessageEntity(
+                        id = result.txId,
+                        contactId = message.contactId,
+                        walletAddress = walletManager.getAddress(),
+                        type = com.kachat.app.util.MessageProtocol.TYPE_COMM,
+                        direction = "sent",
+                        plaintextBody = text,
+                        encryptedPayload = result.payloadHex,
+                        amountSompi = 0,
+                        blockTimestamp = System.currentTimeMillis(),
+                        deliveryStatus = "sent"
+                    )
+                )
+            } catch (e: Exception) {
+                Log.e("ChatViewModel", "Error retrying message", e)
+                chatRepository.updateMessageStatus(message.id, "failed")
+            }
+        }
+    }
+
+    /**
+     * Sends a Kaspa payment via WalletService. Same optimistic pending/failed pattern
+     * as [sendMessage], but with no retry entry point — matches iOS explicitly excluding
+     * payment retry, since blindly re-sending a payment risks paying twice.
+     */
+    /** KaPosts quick tip: Normal/Fast/Priority as a multiplier over the live network fee rate.
+     *  1 (or less) clears the override; the next send consumes whatever is set. */
+    fun setFeeTierMultiplier(multiplier: Long) {
+        _feeRateOverride.value = if (multiplier <= 1) null else (_networkFeeRate.value * multiplier).toLong()
+    }
+
+    /** [onResult] is (succeeded, errorMessage, txId). The txId is what the sent-confirmation
+     *  sheet links to on the explorer; it is null on failure. */
+    fun sendPayment(contactId: String, amount: String, onResult: ((Boolean, String?, String?) -> Unit)? = null) {
+        val amountKas = amount.toDoubleOrNull() ?: run { onResult?.invoke(false, "Enter a valid amount.", null); return }
+        val sompi = (amountKas * 100_000_000).toLong()
+        val feeRate = _feeRateOverride.value
+        _feeRateOverride.value = null
+        viewModelScope.launch {
+            val pendingId = "pending_${java.util.UUID.randomUUID()}"
+            try {
+                val myAddress = walletManager.getAddress()
+                chatRepository.insertMessage(
+                    MessageEntity(
+                        id = pendingId,
+                        contactId = contactId,
+                        walletAddress = myAddress,
+                        type = "pay",
+                        direction = "sent",
+                        plaintextBody = "Sent $amount KAS",
+                        encryptedPayload = "",
+                        amountSompi = sompi,
+                        blockTimestamp = System.currentTimeMillis(),
+                        deliveryStatus = "pending"
+                    )
+                )
+
+                // Fresh-address payment pools (MESSAGING.md): pay a fresh address from the
+                // contact's stored pool when one is available (consumed at selection, persisted
+                // - never offered to another payment even if this one fails), falling back to
+                // the chatting address when no pool exists or Chats Payment Privacy is off.
+                val destination = paymentPoolService.poolPaymentDestination(contactId, pendingId)
+
+                // FUNDING SOURCE - keyed on the per-account Chats Payment Privacy toggle:
+                // ON (default) spends from the spending chain with change routed to a fresh
+                // never-used index (payInKaspa); OFF is chatting-to-chatting end to end - funded
+                // from the chatting address with the identity key, change back to the chatting
+                // address, sharing the exact same UTXO/outpoint bookkeeping message sends use
+                // (KaspaWalletEngine's pending-spent tracking), so an immediately-following
+                // message can't race onto the just-spent outpoints.
+                val privacyOn = paymentPoolService.isChatsPrivacyEnabled()
+                val txId = if (privacyOn) {
+                    walletService.payInKaspa(toAddress = destination, amountSompi = sompi, feeRateOverride = feeRate)
+                } else {
+                    walletService.sendKaspa(toAddress = destination, amountSompi = sompi, feeRateOverride = feeRate)
+                }
+
+                // Pool-address payments announce themselves to the recipient (payment_notice) -
+                // their payment detection only watches the chatting address. No-op when the
+                // destination is the chatting address.
+                paymentPoolService.handlePoolPaymentSubmitted(contactId, txId, sompi, destination, pendingId)
+
+                // The Available pill tracks the post-send state: the fresh-address indicator may
+                // flip (an address was consumed), and the rotated-to spending address's balance
+                // lags the send — retry the balance shortly after, then again once the change
+                // output has typically landed (~1.5s and ~4s, matching iOS's retry schedule).
+                refreshFreshPoolIndicator(contactId)
+                launch {
+                    delay(1_500)
+                    walletService.refreshSpendingBalance()
+                    walletService.refreshBalance()
+                    refreshSpendingUtxos()
+                    delay(2_500)
+                    walletService.refreshSpendingBalance()
+                    walletService.refreshBalance()
+                    refreshSpendingUtxos()
+                    addressActivityNotifier.requestRefresh()
+                }
+
+                chatRepository.finalizeProvisionalMessage(
+                    pendingId,
+                    MessageEntity(
+                        id = txId,
+                        contactId = contactId,
+                        walletAddress = myAddress,
+                        type = "pay",
+                        direction = "sent",
+                        plaintextBody = "Sent $amount KAS",
+                        encryptedPayload = "",
+                        amountSompi = sompi,
+                        blockTimestamp = System.currentTimeMillis(),
+                        deliveryStatus = "sent"
+                    )
+                )
+                onResult?.invoke(true, null, txId)
+            } catch (e: Exception) {
+                Log.e("ChatViewModel", "Error sending payment", e)
+                // Remove the optimistic row rather than leaving it as a failed one (iOS parity):
+                // a payment that never reached the network did not happen, and a permanent
+                // "failed" entry in the history for a send the user was simply short the balance
+                // for is a record of nothing. The caller surfaces the reason instead.
+                chatRepository.deleteMessage(pendingId)
+                onResult?.invoke(false, e.message, null)
+            }
+        }
+    }
+
+    /** The deterministic alias on messages THIS CONTACT sends me (what my sync watches) — Chat
+     *  Info's "Receiving alias". Derived on demand only; null when derivation fails. */
+    fun deriveReceivingAlias(contactId: String): String? =
+        try { walletManager.myDeterministicAlias(contactId) } catch (e: Exception) { null }
+
+    /** The deterministic alias on messages I send this contact — Chat Info's "Sending alias". */
+    fun deriveSendingAlias(contactId: String): String? =
+        try { walletManager.theirDeterministicAlias(contactId) } catch (e: Exception) { null }
+
+    fun getConversation(contactId: String): Conversation? {
+        return conversations.value.find { it.contact.id == contactId }
+    }
+    
+    fun getMessages(contactId: String): Flow<List<MessageEntity>> {
+        return chatRepository.getMessages(contactId)
+    }
+
+    // MARK: - Thread history window + load-older paging (iOS inMemoryConversationWindowSize /
+    // loadOlderMessagesPageAsync)
+
+    /**
+     * Older pages the thread has walked back into, per contact, oldest first. The live window
+     * from the store is the newest [THREAD_WINDOW_SIZE] rows; everything before that arrives
+     * here a page at a time as the reader scrolls up, and stays for the life of the view model
+     * so a re-opened thread does not have to re-page what was already read.
+     */
+    private val _olderThreadPages = MutableStateFlow<Map<String, List<MessageEntity>>>(emptyMap())
+    private val _olderHistoryExhausted = MutableStateFlow<Set<String>>(emptySet())
+    private val _loadingOlderContacts = MutableStateFlow<Set<String>>(emptySet())
+    private val olderPageJobs = mutableMapOf<String, kotlinx.coroutines.Deferred<Int>>()
+    /** The newest window per contact as last emitted, so a page cursor can be taken without a
+     *  round trip to the flow. */
+    private val latestThreadWindows = mutableMapOf<String, List<MessageEntity>>()
+
+    /** Whether the thread for [contactId] is fetching older history right now. */
+    fun isLoadingOlderMessages(contactId: String): Flow<Boolean> =
+        _loadingOlderContacts.map { contactId in it }.distinctUntilChanged()
+
+    /** False once a page came back short: there is nothing older to fetch. */
+    fun hasOlderMessages(contactId: String): Flow<Boolean> =
+        _olderHistoryExhausted.map { contactId !in it }.distinctUntilChanged()
+
+    /**
+     * What the open thread renders: the store's live window (newest rows plus sticky handshakes
+     * and unsent sends) with the older pages the reader has scrolled into prepended. Deduped by
+     * id - a row can sit in both once the window slides - and kept in chain order.
+     */
+    fun threadMessages(contactId: String): Flow<List<MessageEntity>> = combine(
+        chatRepository.getMessageWindow(contactId, THREAD_WINDOW_SIZE, THREAD_UNSENT_STICKY_LIMIT)
+            .onEach { latestThreadWindows[contactId] = it },
+        _olderThreadPages.map { it[contactId].orEmpty() }.distinctUntilChanged(),
+    ) { window, older ->
+        if (older.isEmpty()) return@combine window
+        val seen = HashSet<String>(window.size + older.size)
+        (older + window)
+            .filter { seen.add(it.id) }
+            .sortedWith(compareBy<MessageEntity> { it.blockTimestamp }.thenBy { it.id })
+    }
+
+    /** The oldest row the thread currently holds, which is where the next page starts. */
+    private fun oldestLoadedMessage(contactId: String): MessageEntity? {
+        val older = _olderThreadPages.value[contactId].orEmpty()
+        val candidates = older + latestThreadWindows[contactId].orEmpty()
+        return candidates.minWithOrNull(compareBy<MessageEntity> { it.blockTimestamp }.thenBy { it.id })
+    }
+
+    /**
+     * Pages one batch of older history into the thread. Returns how many rows were added; zero
+     * means the beginning of the conversation has been reached. One fetch per contact at a time:
+     * a second caller joins the in-flight one rather than fetching the same page twice.
+     */
+    suspend fun loadOlderMessages(contactId: String, pageSize: Int = THREAD_OLDER_PAGE_SIZE): Int {
+        if (contactId in _olderHistoryExhausted.value) return 0
+        olderPageJobs[contactId]?.let { return it.await() }
+        val job = viewModelScope.async {
+            _loadingOlderContacts.value = _loadingOlderContacts.value + contactId
+            try {
+                val cursor = oldestLoadedMessage(contactId)
+                if (cursor == null) {
+                    _olderHistoryExhausted.value = _olderHistoryExhausted.value + contactId
+                    return@async 0
+                }
+                val page = try {
+                    chatRepository.getOlderMessagesPage(contactId, cursor, pageSize)
+                } catch (e: Exception) {
+                    Log.w("ChatViewModel", "Older history page failed", e)
+                    emptyList()
+                }
+                if (page.size < pageSize) {
+                    _olderHistoryExhausted.value = _olderHistoryExhausted.value + contactId
+                }
+                if (page.isEmpty()) return@async 0
+                val existing = _olderThreadPages.value[contactId].orEmpty()
+                val known = existing.mapTo(HashSet()) { it.id }
+                val fresh = page.asReversed().filter { it.id !in known }
+                _olderThreadPages.value = _olderThreadPages.value + (contactId to fresh + existing)
+                fresh.size
+            } finally {
+                _loadingOlderContacts.value = _loadingOlderContacts.value - contactId
+            }
+        }
+        olderPageJobs[contactId] = job
+        return try { job.await() } finally { olderPageJobs.remove(contactId) }
+    }
+
+    /**
+     * Pulls every remaining page in, for "jump to the first message": scrolling first would land
+     * on whatever the oldest LOADED row happened to be (iOS jumpToChatStart). Bounded so a store
+     * that keeps answering can never spin here forever.
+     */
+    suspend fun loadAllOlderMessages(contactId: String) {
+        var pagesLeft = 200
+        while (pagesLeft-- > 0) {
+            if (loadOlderMessages(contactId, pageSize = 500) == 0) break
+        }
+    }
+
+    /**
+     * Pages older history in until the thread holds [messageId], for tapping a reply quote whose
+     * original is not loaded yet (iOS jumpToReplyOriginal grows the window to the target).
+     * Returns false when the conversation ran out without finding it.
+     */
+    suspend fun loadOlderMessagesUntil(contactId: String, messageId: String): Boolean {
+        var pagesLeft = 200
+        while (pagesLeft-- > 0) {
+            if (_olderThreadPages.value[contactId].orEmpty().any { it.id == messageId }) return true
+            if (latestThreadWindows[contactId].orEmpty().any { it.id == messageId }) return true
+            if (loadOlderMessages(contactId) == 0) break
+        }
+        return _olderThreadPages.value[contactId].orEmpty().any { it.id == messageId }
+    }
+
+    /**
+     * A tapped quote whose original is on neither the thread nor the store: the reply names it,
+     * so the repository can go and get it rather than just say no (see
+     * ChatRepository.recoverMissingReplyOriginal). Forced: a quote tap retries a known miss.
+     */
+    fun recoverMissingReplyOriginal(contactId: String, replyToId: String, replyBlockTime: Long) {
+        chatRepository.recoverMissingReplyOriginal(contactId, replyToId, replyBlockTime, force = true)
+    }
+
+    /** Older pages belong to the account that read them. */
+    private fun resetThreadHistoryForAccountSwitch() {
+        _olderThreadPages.value = emptyMap()
+        _olderHistoryExhausted.value = emptySet()
+        latestThreadWindows.clear()
+    }
+
+    init {
+        viewModelScope.launch {
+            walletManager.activeAddressFlow.drop(1).collect { resetThreadHistoryForAccountSwitch() }
+        }
+    }
+
+    fun getReactions(contactId: String): Flow<List<ReactionEntity>> {
+        return chatRepository.getReactionsForContact(contactId)
+    }
+
+    /** One sweep at a time - see [refreshKnsNamesForAllContacts]. */
+    private val knsNameSweepRunning = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    companion object {
+        /** Newest rows the open thread keeps live from the store - iOS
+         *  ChatService.inMemoryConversationWindowSize. Older history pages in on scroll. */
+        const val THREAD_WINDOW_SIZE = 160
+
+        /** One scroll-up batch of older history - iOS olderHistoryBatchSize (three ~40-row pages). */
+        const val THREAD_OLDER_PAGE_SIZE = 120
+
+        /** Unsent (pending/failed) rows kept sticky in the window - iOS inMemoryUnsentStickyLimit. */
+        const val THREAD_UNSENT_STICKY_LIMIT = 50
+
+        /** How close to the top of the loaded history counts as "nearing it", in rows - iOS
+         *  nearTopPrefetchThresholdIndex. */
+        const val THREAD_OLDER_PREFETCH_ROWS = 12
+
+        private const val KNS_NAME_SWEEP_KEY = "last_kns_name_sweep_ms"
+        /** A contact's primary domain changes rarely, and the name already lives in the
+         *  database, so the sweep is a refresh rather than something the UI waits on. */
+        private const val KNS_NAME_SWEEP_INTERVAL_MS = 6L * 60 * 60 * 1000
+        /** KNS domain shown as "Donate" in Settings -> About — see [startDonationChat]. */
+        const val DONATION_KNS_DOMAIN = "kachat.kas"
+
+        /** Target raw JPEG bytes for a group chat photo — see [sendPendingGroupPhoto]. */
+        private const val GROUP_PHOTO_TARGET_BYTES = 10_000
+
+        /** Rough byte length of a Nextcloud public share link ("https://<host>/s/<token>") for the
+         *  live fee preview while media is staged in Nextcloud mode — the real send measures the
+         *  actual link exactly, same preview-only contract as [estimatedGroupWirePayloadSize]. */
+        private const val NEXTCLOUD_LINK_PREVIEW_BYTES = 100
+
+        /**
+         * Whether the "the recipient won't see your messages yet" banner belongs in a 1:1 chat.
+         *
+         * Cross-platform corrected semantics (desktop's `relationshipState === "established"`,
+         * which this is the Android equivalent of):
+         *  - Visible from the moment the chat opens. It is NOT gated on having already sent
+         *    something, and NOT gated on the composer having text — the whole point is to warn
+         *    *before* the user types into the void.
+         *  - Hidden only once the relationship is genuinely reciprocated: at least one real
+         *    non-handshake message in EACH direction. Evidence in one direction only isn't
+         *    enough, and a handshake on its own isn't evidence of communication at all.
+         *
+         * "Genuine" excludes handshakes (protocol traffic, not conversation) and empty-bodied
+         * messages, but counts a payment either way — an actual KAS transfer is real two-way
+         * contact even when it carries no note.
+         */
+        /**
+         * A handshake we sent that they have not answered - no handshake back, no genuine message
+         * back. Their answer of either kind makes the action available again.
+         *
+         * A handshake costs 0.2 KAS, and the notice banner deliberately stays up until they
+         * reply, so the screen looks identical before and after a send: tapping again
+         * (reasonably, since nothing appeared to happen) simply spent another 0.2 KAS. Matches
+         * iOS's `hasUnansweredOutgoingHandshake`.
+         */
+        internal fun hasUnansweredOutgoingHandshake(messages: List<MessageEntity>): Boolean {
+            val handshake = com.kachat.app.util.MessageProtocol.TYPE_HANDSHAKE
+            val sentHandshake = messages.any { it.direction == "sent" && it.type == handshake }
+            if (!sentHandshake) return false
+            val answered = messages.any {
+                it.direction == "received" &&
+                    (it.type == handshake || !it.plaintextBody.isNullOrBlank())
+            }
+            return !answered
+        }
+
+        internal fun shouldShowUnnotifiedWarning(messages: List<MessageEntity>): Boolean {
+            fun isGenuine(m: MessageEntity): Boolean =
+                m.type != com.kachat.app.util.MessageProtocol.TYPE_HANDSHAKE &&
+                    (m.type == com.kachat.app.util.MessageProtocol.TYPE_PAY || !m.plaintextBody.isNullOrBlank())
+
+            val hasGenuineOutgoing = messages.any { it.direction == "sent" && isGenuine(it) }
+            val hasGenuineIncoming = messages.any { it.direction == "received" && isGenuine(it) }
+            // A handshake FROM them also ends the warning: whether it's their acceptance of our
+            // handshake or their own initiation, their side provably has the conversation and
+            // can see what we send - waiting for a genuine reply made the banner outlive a
+            // completed handshake. A sent-but-unanswered handshake keeps it up. Matches iOS.
+            val hasIncomingHandshake = messages.any {
+                it.direction == "received" && it.type == com.kachat.app.util.MessageProtocol.TYPE_HANDSHAKE
+            }
+
+            return !hasIncomingHandshake && !(hasGenuineOutgoing && hasGenuineIncoming)
+        }
+
+        /** Matches iOS's `shouldShowRetry` — only failed outgoing non-payment messages can be retried. */
+        internal fun shouldShowRetryOption(message: MessageEntity): Boolean =
+            message.direction == "sent" && message.deliveryStatus == "failed" && message.type != com.kachat.app.util.MessageProtocol.TYPE_PAY
+
+        /**
+         * Safe to auto-overwrite a contact's alias with the detected primary KNS domain only if
+         * it's unset — never clobber a real custom nickname the user typed in, matching iOS's
+         * identical rule. A contact linked to a system (phone) contact is never eligible either
+         * way, regardless of what its alias currently looks like — that link always takes
+         * priority. Once any domain is associated with a contact (`knsName` set, whether by this
+         * same auto-detection or by an explicit pick in Chat Info), that choice is pinned —
+         * without this, an explicit non-primary domain selection would silently revert back to
+         * primary the next time this runs, since the selected domain also "looks like" a domain
+         * and would otherwise pass the old unset-or-domain-shaped check.
+         */
+        internal fun canAutoUpdateAliasToDomain(currentAlias: String?, systemContactId: String? = null, knsName: String? = null): Boolean =
+            systemContactId == null && knsName == null && currentAlias == null
+    }
+}
