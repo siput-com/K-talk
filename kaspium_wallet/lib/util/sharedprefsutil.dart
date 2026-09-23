@@ -1,0 +1,146 @@
+// ignore_for_file: constant_identifier_names
+
+import 'dart:async';
+import 'dart:convert';
+
+import 'package:shared_preferences/shared_preferences.dart';
+
+import '../settings/authentication_method.dart';
+import '../settings/available_currency.dart';
+import '../settings/available_language.dart';
+import '../settings/available_themes.dart';
+
+/// Price conversion preference values
+enum PriceConversion { BTC, NONE, HIDDEN }
+
+/// Singleton wrapper for shared preferences
+class SharedPrefsUtil {
+  final SharedPreferences sharedPrefs;
+  SharedPrefsUtil(this.sharedPrefs);
+
+  // Keys
+  static const String first_launch_key = 'fkaspium_first_launch';
+  static const String auth_method = 'fkaspium_auth_method';
+  static const String cur_currency = 'fkaspium_currency_pref';
+  static const String cur_language = 'fkaspium_language_pref';
+  static const String cur_theme = 'fkaspium_theme_pref';
+  static const String firstcontact_added = 'fkaspium_first_contact_added';
+  // If user has seen the root/jailbreak warning yet
+  static const String has_shown_root_warning = 'fkaspium_root_warn';
+  static const String notice_shown = 'fkaspium_notice_shown';
+
+  // For plain-text data
+  Future<bool> set<T>(String key, T value) async {
+    if (value is bool) {
+      return sharedPrefs.setBool(key, value);
+    } else if (value is String) {
+      return sharedPrefs.setString(key, value);
+    } else if (value is double) {
+      return sharedPrefs.setDouble(key, value);
+    } else if (value is int) {
+      return sharedPrefs.setInt(key, value);
+    }
+    return false;
+  }
+
+  T get<T>(String key, {required T defaultValue}) {
+    final value = sharedPrefs.get(key);
+    if (value == null || value is! T) return defaultValue;
+    return value as T;
+  }
+
+  /// Set a key with an expiry, expiry is in seconds
+  Future<void> setWithExpiry(String key, dynamic value, int expiry) async {
+    int expiryVal;
+    if (expiry != -1) {
+      DateTime now = DateTime.now().toUtc();
+      DateTime expired = now.add(Duration(seconds: expiry));
+      expiryVal = expired.millisecondsSinceEpoch;
+    } else {
+      expiryVal = expiry;
+    }
+    Map<String, dynamic> msg = {'data': value, 'expiry': expiryVal};
+    String serialized = json.encode(msg);
+    set(key, serialized);
+  }
+
+  /// Get a key that has an expiry
+  Future<T?> getWithExpiry<T>(String key) async {
+    String? val = get(key, defaultValue: null);
+    if (val == null) {
+      return null;
+    }
+    Map<String, dynamic> msg = json.decode(val);
+    if (msg['expiry'] != -1) {
+      DateTime expired = DateTime.fromMillisecondsSinceEpoch(msg['expiry']);
+      if (DateTime.now().toUtc().difference(expired).inMinutes > 0) {
+        await remove(key);
+        return null;
+      }
+    }
+    return msg['data'];
+  }
+
+  Future<void> remove(String key) => sharedPrefs.remove(key);
+
+  /// Enums are stored by name
+  T getEnum<T extends Enum>(String key, List<T> values, T defaultValue) {
+    final name = get(key, defaultValue: defaultValue.name);
+    return values.asNameMap()[name] ?? defaultValue;
+  }
+
+  // Key-specific helpers
+
+  Future<void> setHasSeenRootWarning() {
+    return set(has_shown_root_warning, true);
+  }
+
+  bool getHasSeenRootWarning() =>
+      get(has_shown_root_warning, defaultValue: false);
+
+  Future<void> setFirstLaunch() => set(first_launch_key, false);
+  bool getFirstLaunch() => get(first_launch_key, defaultValue: true);
+
+  Future<void> setFirstContactAdded(bool value) =>
+      set(firstcontact_added, value);
+
+  bool getFirstContactAdded() => get(firstcontact_added, defaultValue: false);
+
+  Future<void> setNoticeShown(bool value) => set(notice_shown, value);
+  bool getNoticeShown() => get(notice_shown, defaultValue: false);
+
+  Future<void> setAuthMethod(AuthenticationMethod method) =>
+      set(auth_method, method.getId());
+
+  AuthenticationMethod getAuthMethod() => AuthenticationMethod(
+    getEnum(auth_method, AuthMethod.values, .BIOMETRICS),
+  );
+
+  Future<void> setCurrency(AvailableCurrency currency) =>
+      set(cur_currency, currency.getId());
+
+  AvailableCurrency getCurrency() => AvailableCurrency(
+    getEnum(cur_currency, AvailableCurrencies.values, .USD),
+  );
+
+  Future<void> setLanguage(LanguageSetting language) =>
+      set(cur_language, language.getId());
+
+  LanguageSetting getLanguage() => LanguageSetting(
+    getEnum(cur_language, AvailableLanguage.values, .DEFAULT),
+  );
+
+  Future<void> setTheme(ThemeSetting theme) => set(cur_theme, theme.getId());
+  ThemeSetting getTheme() => ThemeSetting(
+    getEnum(cur_theme, ThemeOptions.values, .KASPIUM_DARK),
+  );
+
+  // For logging out
+  Future<void> deleteAll() {
+    return Future.wait([
+      sharedPrefs.remove(cur_currency),
+      sharedPrefs.remove(auth_method),
+      sharedPrefs.remove(has_shown_root_warning),
+    ]);
+  }
+}

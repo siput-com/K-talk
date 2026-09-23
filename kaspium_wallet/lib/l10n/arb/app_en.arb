@@ -1,0 +1,649 @@
+{
+  "@@locale": "en",
+  "aboutTopperDescription": "Topper by Uphold is an easy to use fiat-to-crypto onramp that allows users to buy cryptocurencies using a credit/debit card or with a bank account.",
+  "aboutTopperTitle": "About Topper",
+  "accepted": "accepted",
+  "account": "Account",
+  "accounts": "Accounts",
+  "ackBackedUp": "Are you sure that you've backed up your secret phrase?",
+  "add": "Add",
+  "addContact": "Add Contact",
+  "addingNodeMessage": "Please wait while contacting node",
+  "addingNodeTitle": "Adding Node",
+  "addNode": "Add Node",
+  "addNodeFailed": "Failed to add Kaspa node",
+  "addNodeFailedMessage": "Failed: {error}",
+  "@addNodeFailedMessage": {
+    "placeholders": {
+      "error": {
+        "type": "String"
+      }
+    }
+  },
+  "addNodeSuccess": "Node Added Successfully",
+  "address": "Address",
+  "addressCopied": "Address Copied",
+  "addressCopiedFailed": "Failed to copy address",
+  "addressDiscovery": "Address Discovery",
+  "addressesChecked": "{count} checked",
+  "@addressesChecked": {
+    "placeholders": {
+      "count": {
+        "type": "int",
+        "example": "300"
+      }
+    }
+  },
+  "addressFilterDialogOptionAllAddresses": "View All Addresses",
+  "addressFilterDialogOptionNonZeroBalances": "View Addresses With Balance",
+  "addressFilterDialogTitle": "Address Filter",
+  "addressHint": "Enter Address",
+  "addressMising": "Please Enter an Address",
+  "addressShare": "Share Address",
+  "advancedHeader": "Advanced",
+  "amount": "Amount",
+  "amountMissing": "Please Enter an Amount",
+  "amountZero": "Amount can't be zero",
+  "areYouSure": "Are you sure?",
+  "authBiometricMessage": "Authenticate to Add Wallet",
+  "authMethod": "Authentication Method",
+  "authPinMessage": "Enter PIN to Add Wallet",
+  "autoLockHeader": "Automatically Lock",
+  "available": "Available",
+  "backupConfirmButton": "I've Backed It Up",
+  "backupSecretPhrase": "Backup Secret Phrase",
+  "balance": "Balance",
+  "biometricsMethod": "Biometrics",
+  "bip39Passphrase": "BIP39 Passphrase",
+  "bip39PassphraseConfirm": "Confirm Passphrase",
+  "bip39PassphraseEnter": "Enter Passphrase",
+  "bip39PassphraseMismatch": "Passphrases do not match!",
+  "bip39PassphraseNote": "Wallet with BIP39 passphrase.",
+  "bip39PassphraseWarning": "NOTE: This is not a wallet password, different BIP39 passphrases will open different wallets.",
+  "blockExplorer": "Block Explorer",
+  "buyKaspaMessage": "Buy $KAS quickly & easily.",
+  "buyKaspaMessageSecondary": "Service provided by Topper, Uphold's fiat-to-crypto onramp.",
+  "buyKaspaSubtitle": "Via Topper by Uphold",
+  "buyKaspaTitle": "Buy Kaspa",
+  "cancel": "Cancel",
+  "cancelTransaction": "Cancel Transaction",
+  "cancelTransactionError": "Can't cancel transaction",
+  "cancelTransactionSuccess": "RBF cancel transaction sent",
+  "change": "Change",
+  "changeAddress": "Change Address",
+  "changeAddressCopied": "Change address copied",
+  "changeAddressListEmpty": "Change address list is empty",
+  "changeIndex": "Change Index",
+  "changeIndexParam": "Change {addressIndex}",
+  "@changeIndexParam": {
+    "placeholders": {
+      "addressIndex": {
+        "type": "String",
+        "example": "1"
+      }
+    }
+  },
+  "checkCameraPermission": "Please check camera permissions",
+  "clipboardEmpty": "Clipboard is empty",
+  "close": "Close",
+  "closeUppercased": "CLOSE",
+  "compoundRequired": "Compound required",
+  "compoundRequiredDescription": "The transaction amount requires too many UTXOs. Compounding will reduce the number of UTXOs.",
+  "compoundSuccess": "Compound successful",
+  "compoundTooFewUtxos": "At least two UTXOs are required",
+  "compoundUppercased": "COMPOUND",
+  "compoundUtxos": "Compound transactions",
+  "compoundUtxosConfirmation": "Compound transactions?",
+  "compoundUtxosDescription": "Combine multiple UTXOs into one",
+  "confirm": "Confirm",
+  "confirmations": "{confirmations} confirmations",
+  "@confirmations": {
+    "placeholders": {
+      "confirmations": {
+        "type": "String",
+        "example": "2"
+      }
+    }
+  },
+  "confirmed": "confirmed",
+  "confirming": "confirming",
+  "confirmPasswordHint": "Confirm the password",
+  "contactAdded": "{contactName} added to contacts",
+  "@contactAdded": {
+    "placeholders": {
+      "contactName": {
+        "type": "String"
+      }
+    }
+  },
+  "contactAddressCopied": "{address} address copied",
+  "@contactAddressCopied": {
+    "placeholders": {
+      "address": {
+        "type": "String"
+      }
+    }
+  },
+  "contactExists": "Contact Already Exists",
+  "contactHeader": "Contact",
+  "contactInvalid": "Invalid Contact Name",
+  "contactNameHint": "Enter a Name @",
+  "contactNameMissing": "Choose a Name for this Contact",
+  "contactRemoved": "{contactName} has been removed from contacts!",
+  "@contactRemoved": {
+    "placeholders": {
+      "contactName": {
+        "type": "String"
+      }
+    }
+  },
+  "contactsHeader": "Contacts",
+  "contactsImportErr": "Failed to import contacts",
+  "contactsImportSuccess": "Sucessfully imported {noContacts} contacts",
+  "@contactsImportSuccess": {
+    "placeholders": {
+      "noContacts": {
+        "type": "String"
+      }
+    }
+  },
+  "contactSupport": "Contact Support",
+  "copied": "Copied",
+  "copy": "Copy",
+  "copyAddress": "Copy Address",
+  "copyErrorButton": "Copy Error",
+  "copyKpub": "Copy Kpub",
+  "createAPasswordHeader": "Create a password.",
+  "createPasswordFirstParagraph": "You can create a password to add additional security to your wallet.",
+  "createPasswordHint": "Create a password",
+  "createPasswordSecondParagraph": "Password is optional, and your wallet will be protected with your PIN or biometrics regardless.",
+  "createPasswordSheetHeader": "Create",
+  "currency": "Currency",
+  "currencyPoweredBy": "Powered by CoinGecko",
+  "defaultWalletName": "My Wallet",
+  "disablePasswordSheetHeader": "Disable",
+  "disablePasswordSuccess": "Password has been disabled",
+  "disableWalletPassword": "Disable Wallet Password",
+  "doContinue": "Continue",
+  "donate": "Donate",
+  "dontShowAgain": "Don't show again",
+  "emailAction": "Email {email}",
+  "@emailAction": {
+    "placeholders": {
+      "email": {
+        "type": "String"
+      }
+    }
+  },
+  "emptyCardIntroUtxos": "This is the UTXOs tab. All UTXOs in your wallet will appear here",
+  "emptyResult": "Empty Result",
+  "emptyWalletName": "Wallet Name cannot be empty",
+  "encryptionFailedError": "Failed to set a wallet password",
+  "enterAddress": "Enter Address",
+  "enterAmount": "Enter Amount",
+  "enterFiatValue": "Enter Fiat Value",
+  "enterNote": "Enter Note",
+  "enterPasswordHint": "Enter your password",
+  "errorMessageCopied": "Error message copied to clipboard",
+  "exampleCardIntro": "This is the transactions tab. Once you send or receive a transaction, it will show up here.",
+  "export": "Export",
+  "fee": "Fee",
+  "@fee": {},
+  "feePriorityHint": "Enter Fee",
+  "feePriorityUppsercase": "NEW FEE",
+  "feeSheetPriorityFeeWarning": "New fee must be at least {amount} {symbol}",
+  "@feeSheetPriorityFeeWarning": {
+    "placeholders": {
+      "amount": {
+        "type": "String"
+      },
+      "symbol": {
+        "type": "String"
+      }
+    }
+  },
+  "feeSheetRecommendedPriority": "Recommended Priority Fees",
+  "feeTitle": "FEE",
+  "feeUpdateError": "Failed to update fee",
+  "feeUpdateTitle": "Updating fee",
+  "feeHighTitle": "High Fee",
+  "feeHighDescription": "Are you sure you want to send the transaction?",
+  "feeHighDescriptionAmount": "Transaction fee is {amount} {symbol}.",
+  "@feeHighDescriptionAmount": {
+    "placeholders": {
+      "amount": {
+        "type": "String"
+      },
+      "symbol": {
+        "type": "String"
+      }
+    }
+  },
+  "feeCompoundAmountAdjusted": "Compound amount adjusted to account for new fee",
+  "feeAmountAdjustmentTitle": "Amount adjustment required",
+  "feeAmountAdjustmentDescription": "The new fee requires that the transaction amount is adjusted from {currentAmount} {symbol} to {newAmount} {symbol}",
+  "@feeAmountAdjustmentDescription": {
+    "placeholders": {
+      "currentAmount": {
+        "type": "String"
+      },
+      "newAmount": {
+        "type": "String"
+      },
+      "symbol": {
+        "type": "String"
+      }
+    }
+  },
+  "feeAmountNotEnough": "Current amount can't cover new fee",
+  "feePriorityMin": "Min",
+  "feePriorityLow": "Low",
+  "feePriorityNormal": "Economic",
+  "feePriorityHigh": "Priority",
+  "fetchingTransactions": "Fetching Transactions",
+  "fingerprintSeedBackup": "Authenticate to Backup Secret Phrase.",
+  "getStarted": "Get Started",
+  "goBackButton": "Go Back",
+  "gotItButton": "Got It!",
+  "hintAddressListEmpty": "Check address filter from the top right corner",
+  "import": "Import",
+  "importAsLegacyWallet": "Import as Legacy Wallet",
+  "importAsStandardWallet": "Import as Standard Wallet",
+  "importKpub": "Import Watch Only Wallet",
+  "importKpubClipboardError": "Clipboard content is not a valid extended public key",
+  "importKpubHint": "Please enter your extended public key.",
+  "importKpubQrCodeError": "QR code does not contain a valid extended public key",
+  "importLegacyWalletDetectedDetails": "Do you want to import your wallet in legacy mode?",
+  "importLegacyWalletDetectedTitle": "Legacy Wallet Detected",
+  "importOptionKpubDescription": "Monitor the balance and transactions of a wallet using an extended public key",
+  "importOptionKpubTitle": "Import Watch Only Wallet",
+  "importOptionLegacyWalletDescription": "Legacy derivation 12 word wallets compatible with legacy Web Wallet and KDX",
+  "importOptionLegacyWalletTitle": "Import Legacy Wallet",
+  "importOptionStandardWalletDescription": "Standard derivation 12 or 24 word wallets with optional BIP39 passphrase",
+  "importOptionStandardWalletTitle": "Import Standard Wallet",
+  "importSecretPhraseHintCombo": "Please enter your 12 or 24 word secret phrase below.",
+  "importSecretPhraseHintLegacy": "Please enter your 12 word secret phrase below.",
+  "importWallet": "Import Wallet",
+  "importWalletAdvancedOptions": "Advanced Options",
+  "importWalletDescription": "Please select an option below.",
+  "insufficientBalance": "Insufficient Balance",
+  "insufficientBalanceDetails": "You don't have enough KAS for this transaction",
+  "invalidAddress": "Address entered was invalid",
+  "invalidChecksumMessage": "Please check that your Secret Phrase\n is entered correctly!",
+  "invalidKpubMessage": "Please check that your extended public key is entered correctly!",
+  "invalidPassword": "Invalid Password",
+  "invalidSecretPhrase": "Invalid Secret Phrase",
+  "invalidSecretPhraseConfirmation": "I know what I'm doing",
+  "invalidSecretPhraseDetails": "The Secret Phrase you entered has an invalid checksum.",
+  "kaspaUriCopied": "Kaspa URI Copied",
+  "kaspaUriCopyFailed": "Failed to copy Kaspa URI",
+  "kaspaUriInvalid": "Invalid Kaspa URI",
+  "kaspiumWallet": "Kaspium Wallet",
+  "kpubAuth": "View Extended Public Key",
+  "kpubCopied": "Extended Public Key Copied",
+  "kpubCopyFailed": "Failed to copy Extended Public Key",
+  "kpubDescription": "The extended public key can be used to import your wallet as a 'watch only' wallet.",
+  "kpubTitle": "Extended Public Key",
+  "language": "Language",
+  "lastUsedIndex": "Last used",
+  "loadingTransactions": "Loading Transactions...",
+  "lockAppSetting": "Authenticate on Launch",
+  "locked": "Locked",
+  "loggingOutMessage": "Logging out...",
+  "logout": "Logout",
+  "logoutDialogContent": "Are you sure you want to logout from this wallet?",
+  "logoutOrSwitchWallet": "Logout / Switch Wallet",
+  "manage": "Manage",
+  "maxSend": "Max Send",
+  "missingSecretPhrase": "Missing Secret Phrase",
+  "moreInfo": "More Info",
+  "networkHeader": "Network",
+  "newAddress": "New Address",
+  "newWallet": "New Wallet",
+  "nextButton": "Next",
+  "no": "No",
+  "noContactsExport": "There's no contacts to export",
+  "noContactsImport": "No new contacts to import",
+  "nodeAddress": "Kaspa Node",
+  "nodeDeleteMessage": "Are you sure you want to delete?",
+  "nodeDeleteTitle": "Delete Kaspa Node Config?",
+  "nodeNameEmpty": "Node name cannot be empty",
+  "nodeNameHint": "Enter Node Name",
+  "nodeNotSyncedException": "Node is not synced",
+  "nodeNoUTXOIndexException": "Node does not have UTXO index",
+  "nodeSecureConnection": "Secure connection",
+  "nodesSheetTitle": "Kaspa Nodes",
+  "nodeUrlHint": "Enter Node URL",
+  "nodeUrlInvalid": "Invalid node URL",
+  "noQrCodeFound": "No QR code found",
+  "noSkipButton": "No, Skip",
+  "notAccepted": "not accepted",
+  "noteLabel": "Note:",
+  "noUppercase": "NO",
+  "off": "Off",
+  "on": "On",
+  "optionalLabel": "(Optional)",
+  "passwordBlank": "Password cannot be empty",
+  "passwordNoLongerRequiredToOpenParagraph": "You will not need a password to open this wallet.",
+  "passwordsDontMatch": "Passwords do not match",
+  "passwordWillBeRequiredToOpenParagraph": "This password will be required to open this wallet.",
+  "pasteMnemonicError": "Clipboard content is not a valid secret phrase",
+  "pending": "pending",
+  "pinConfirmError": "Pins do not match",
+  "pinConfirmTitle": "Confirm your PIN",
+  "pinCreateTitle": "Create a 6-digit PIN",
+  "pinEnterTitle": "Enter PIN",
+  "pinInvalid": "Invalid PIN entered",
+  "pinMethod": "PIN",
+  "pinSeedBackup": "Enter PIN to Backup Secret Phrase",
+  "preferences": "Preferences",
+  "privacyPolicy": "Privacy Policy",
+  "qrInvalidAddress": "QR code does not contain a valid address",
+  "qrMnemonicError": "QR code does not contain a valid secret phrase",
+  "receive": "Receive",
+  "receiveAddress": "Receive Address",
+  "receiveAddressCopied": "Receive address copied",
+  "receiveAddressListEmpty": "Receive address list is empty",
+  "received": "Received",
+  "receiveIndex": "Receive Index",
+  "receiveIndexParam": "Receive {addressIndex}",
+  "@receiveIndexParam": {
+    "placeholders": {
+      "addressIndex": {
+        "type": "String",
+        "example": "1"
+      }
+    }
+  },
+  "removeContact": "Remove Contact",
+  "removeContactConfirmation": "Are you sure you want to delete {contactName}?",
+  "@removeContactConfirmation": {
+    "placeholders": {
+      "contactName": {
+        "type": "String"
+      }
+    }
+  },
+  "removeWalletAction": "Remove Wallet",
+  "removeWalletBiometricsMessage": "Authenticate to Remove Wallet",
+  "removeWalletDetail": "Removing this wallet will remove the Secret Phrase and all wallet-related data from this device. If the Secret Phrase is not backed up, you will never be able to access your funds again.",
+  "removeWalletPinMessage": "Enter PIN to Remove Wallet",
+  "removeWalletReassurance": "As long as you've backed up the Secret Phrase you have nothing to worry about.",
+  "requireAPasswordToOpenHeader": "Require a password to open this wallet?",
+  "restartSetupButton": "Restart Setup",
+  "scanFailedMessage": "Scan failed, please try again later",
+  "scanFoundAddresses": "{count, plural, =1{1 new address found} other{{count} new addresses found}}",
+  "@scanFoundAddresses": {
+    "placeholders": {
+      "count": {
+        "type": "int",
+        "example": "3"
+      }
+    }
+  },
+  "scanFoundNoAddresses": "No new addresses found",
+  "scanMoreAddresses": "Scan For More Addresses",
+  "scannedIndex": "Scanned",
+  "scanningChangeAddresses": "Scanning change addresses",
+  "scanningReceiveAddresses": "Scanning receive addresses",
+  "scanQrCode": "Scan QR Code",
+  "scanQrCodeError": "Failed to parse qr code",
+  "scanStopped": "Scan stopped",
+  "scanSyncingTransactions": "Syncing their transactions…",
+  "secretInfo": "In the next screen, you will see your secret phrase. It is a password to access your funds. It is crucial that you back it up and never share it with anyone.",
+  "secretInfoHeader": "Safety First!",
+  "secretPhrase": "Secret Phrase",
+  "secretPhrase12Words": "12 WORDS",
+  "secretPhrase24Words": "24 WORDS",
+  "secretWarning": "If you lose your device or uninstall the application, you'll need your secret phrase to recover your funds!",
+  "securityHeader": "Security",
+  "securitySettingsBiometrics": "Authenticate to Access Security Settings",
+  "securitySettingsPin": "Enter PIN to Access Security Settings",
+  "seed": "Seed",
+  "selectAddress": "Select Address",
+  "send": "Send",
+  "sendConfirm": "Send",
+  "sendError": "An error occurred. Please try again",
+  "sending": "Send",
+  "sendNote": "NOTE",
+  "sendToAddressTitle": "To",
+  "sendTxProgressDescription": "Please wait while the transaction is sent",
+  "sendTxProgressTitle": "Sending Transaction",
+  "sent": "Sent",
+  "sentTo": "Sent to",
+  "setPassword": "Set Password",
+  "setPasswordSuccess": "Wallet password has been set",
+  "setupFailedMessage": "Something went wrong",
+  "setWalletPassword": "Set Wallet Password",
+  "shareKaspium": "Share Kaspium",
+  "shareKaspiumSubject": "Check out Kaspium Wallet",
+  "shareKaspiumText": "Check out Kaspium - Kaspa Mobile Wallet.\nWebsite - kaspium.io",
+  "somethingWentWrong": "Something went wrong",
+  "syncingAddresses": "{completed} of {total} addresses",
+  "@syncingAddresses": {
+    "placeholders": {
+      "completed": {
+        "type": "int",
+        "example": "3"
+      },
+      "total": {
+        "type": "int",
+        "example": "12"
+      }
+    }
+  },
+  "syncingTransactions": "Syncing Transactions...",
+  "systemDefault": "System Default",
+  "tapToHide": "Tap to hide",
+  "tapToReveal": "Tap to reveal",
+  "themeDark": "Dark Theme",
+  "themeHeader": "Theme",
+  "themeLight": "Light Theme",
+  "thisWallet": "#This Wallet",
+  "to": "To",
+  "toAddress": "To Address",
+  "tooManyFailedAttempts": "Too many failed unlock attempts.",
+  "transactionId": "Transaction ID",
+  "transactionsUppercase": "TRANSACTIONS",
+  "transfer": "Transfer",
+  "txFilterDialogOptionAllTxs": "Show All Transactions",
+  "txFilterDialogOptionHideNotAcceptedCoinbase": "Hide Not Accepted Coinbase Transactions",
+  "txFilterDialogTitle": "Transaction Filter",
+  "txInMempool": "in mempool",
+  "txPending": "PENDING",
+  "txPendingActionRbf": "Replace By Fee",
+  "txPendingContent": "There is a pending transactions in the mempool.",
+  "txPendingMessage": "This transaction is pending",
+  "txPendingTitle": "Pending Transaction",
+  "txReport": "Transaction Report",
+  "txReportDate": "Date",
+  "txReportDescription": "Description",
+  "txReportDetails": "Generate a transaction report, in CSV format, that contains all the wallet's transaction history.",
+  "txReportError": "Error generating report",
+  "txReportFeeAmount": "Fee Amount",
+  "txReportFeeCurrency": "Fee Currency",
+  "txReportFeeForCompound": "Fee for Compound Transaction",
+  "txReportFeeForSelfSend": "Fee to send to own addresses",
+  "txReportGenerate": "Generate",
+  "txReportGetReport": "Get Report",
+  "txReportLabel": "Label",
+  "txReportNoLoadedTxs": "({loadedTxs} of {totalTxs})",
+  "@txReportNoLoadedTxs": {
+    "placeholders": {
+      "loadedTxs": {
+        "type": "int"
+      },
+      "totalTxs": {
+        "type": "int"
+      }
+    }
+  },
+  "txReportNote": "Note",
+  "txReportNoTxs": "Found {numberOf} transactions.",
+  "@txReportNoTxs": {
+    "placeholders": {
+      "numberOf": {
+        "type": "int"
+      }
+    }
+  },
+  "txReportOptionIgnoreCompound": "Ignore compound transactions",
+  "txReportOptionIgnoreSelfTxs": "Ignore transactions sent to self",
+  "txReportReceivedAmount": "Received Amount",
+  "txReportReceivedCurrency": "Received Currency",
+  "txReportSentAmount": "Sent Amount",
+  "txReportSentCurrency": "Sent Currency",
+  "txReportStatusLoading": "Loading transactions",
+  "txReportStatusReady": "Transaction report is ready!",
+  "txReportStatusRefreshing": "Refreshing transactions",
+  "txReportSubtitle": "Get CSV file with transaction history",
+  "txReportTxHash": "TxHash",
+  "unconfirmed": "unconfirmed",
+  "unknown": "unknown",
+  "unlock": "Unlock",
+  "unlockBiometrics": "Authenticate to Unlock Wallet",
+  "unlockPin": "Enter PIN to Unlock Wallet",
+  "utxoCompoundCardDescription": "You have {count} UTXOs — tap to compound.",
+  "@utxoCompoundCardDescription": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "utxoCompoundCardTitle": "Compound recommended",
+  "utxoSelectionHint": "Please select more UTXOs",
+  "utxoSelectionMaxInputs": "A transaction can use at most {count} UTXOs",
+  "@utxoSelectionMaxInputs": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "utxoSelectionSelectedAmount": "Selected Amount",
+  "utxoSelectionSelectedCount": "Selected UTXOs",
+  "utxoSelectionTargetAmount": "Target Amount",
+  "utxoSelectionTitle": "Select UTXOs",
+  "utxoSelectionTotalFee": "Total Fee",
+  "utxosUppercase": "UTXOs",
+  "viewAddress": "View Address",
+  "viewTransaction": "View Transaction",
+  "walletAddress": "Wallet Address",
+  "@walletAddress": {},
+  "walletAddresses": "Wallet Addresses",
+  "@walletAddresses": {},
+  "walletAddressesCopied": "Wallet {addressType} Addresses Copied to Clipboard",
+  "@walletAddressesCopied": {
+    "placeholders": {
+      "addressType": {
+        "type": "String"
+      }
+    }
+  },
+  "walletAddressesCopyFailed": "Failed to Copy Wallet {addressType} Addresses",
+  "@walletAddressesCopyFailed": {
+    "placeholders": {
+      "addressType": {
+        "type": "String"
+      }
+    }
+  },
+  "walletName": "Wallet name",
+  "walletNameDescription": "Enter a name for your wallet",
+  "walletNameHint": "Wallet Name",
+  "walletSetupAddressDiscovery": "Running Address Discovery",
+  "walletSetupMessage": "Setting up wallet",
+  "walletsTitle": "Wallets",
+  "warning": "Warning",
+  "welcomeMessage": "Welcome!\n\nThis is version {version} of Kaspium - the mobile wallet for Kaspa",
+  "@welcomeMessage": {
+    "placeholders": {
+      "version": {
+        "type": "String"
+      }
+    }
+  },
+  "welcomeText": "Welcome to Kaspium. To begin, you may create a new wallet or import an existing one.",
+  "yes": "Yes",
+  "yesButton": "Yes",
+  "yesUppercase": "YES",
+  "notifications": "Notifications",
+  "notificationsDescription": "Receive notifications for incoming transactions.",
+  "notificationsSettingTitle": "Setting Notifications",
+  "notificationsSettingMessage": "Please wait...",
+  "notificationsResettingTitle": "Resetting Notifications",
+  "notificationsEnableFailed": "Failed to Enable Notifications",
+  "notificationsDisableFailed": "Failed to Disable Notifications",
+  "notificationsResetFailed": "Failed to Reset Notifications",
+  "notificationsEnablePin": "Enter PIN to Enable Notifications",
+  "notificationsEnableBiometrics": "Authenticate to Enable Notifications",
+  "notificationsDisablePin": "Enter PIN to Disable Notifications",
+  "notificationsDisableBiometrics": "Authenticate to Disable Notifications",
+  "notificationsResetPin": "Enter PIN to Reset Notifications",
+  "notificationsResetBiometrics": "Authenticate to Reset Notifications",
+  "notificationsInfoPin": "Enter PIN to Show Notifications Info",
+  "notificationsInfoBiometrics": "Authenticate to Show Notifications Info",
+  "notificationsDisabledTitle": "Notifications Disabled",
+  "notificationsDisabledMessage": "Please allow notifications from device settings",
+  "notificationsResetConfirmTitle": "Reset Notifications?",
+  "notificationsResetConfirmMessage": "This will reset all Kaspium notification settings for this device.",
+  "notificationsInfoTitle": "Notifications Info",
+  "notificationsDisclosure": "While notifications are on, Kaspium shares the addresses you choose to watch, your device's push token and random identifiers with the Kaspium notification service. They are used only to deliver notifications for incoming transactions, are not linked to any other data, and are deleted when you turn notifications off for all wallets or reset them.",
+  "notificationsClaimPending": "Verifying this device, please try again in a moment",
+  "notificationsSupportId": "Support Id",
+  "notificationsSupportIdCopied": "Support Id copied!",
+  "notificationsAccountId": "Account Id",
+  "notificationsAccountIdCopied": "Account Id copied!",
+  "resetNotifications": "Reset Notifications",
+  "turnOn": "Turn ON",
+  "turnOff": "Turn OFF",
+  "watchedAddresses": "Watched Addresses",
+  "watchedAddressesCount": "Watching {count, plural, =1{1 address} other{{count} addresses}} (max {max})",
+  "@watchedAddressesCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      },
+      "max": {
+        "type": "int"
+      }
+    }
+  },
+  "watchedAddressesHint": "Tap an address to cycle between auto, pinned and excluded. Pinned addresses are always monitored, excluded addresses never. Auto addresses are monitored while among the newest.",
+  "watchedAddressesEmptyTitle": "No Watched Addresses",
+  "watchedAddressesEmptyMessage": "Notifications require at least one watched address. Turn off notifications, or cancel to keep editing.",
+  "pinLimitReached": "At most {max} addresses can be pinned",
+  "@pinLimitReached": {
+    "placeholders": {
+      "max": {
+        "type": "int"
+      }
+    }
+  },
+  "resetUppercase": "RESET",
+  "switchUppercase": "SWITCH",
+  "switchToMainnetMessage": "Switch to mainnet to view the transaction",
+  "switchWalletTitle": "Switch Wallet?",
+  "switchWalletMessageParam": "Switch to \"{walletName}\" to view transaction?",
+  "@switchWalletMessageParam": {
+    "placeholders": {
+      "walletName": {
+        "type": "String",
+        "example": "Kaspium"
+      }
+    }
+  },
+  "switchingWalletMessage": "Switching wallet",
+  "signMessage": "Sign Message",
+  "signMessageDescription": "Sign a text message",
+  "signMessageSigned": "Message Signed",
+  "signMessageHint": "Enter Message to Sign",
+  "signMessageToLong": "Message is too long",
+  "signMessageCopySignature": "Copy Signature",
+  "signMessageSignatureCopied": "Signature Copied",
+  "signMessageSignature": "Signature",
+  "signMessageQrCode": "QR Code",
+  "signMessageMessageHashCopied": "Message Hash Copied",
+  "signMessageMessageHash": "Message Hash"
+}

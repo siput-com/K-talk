@@ -1,0 +1,146 @@
+import 'package:flutter/widgets.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import '../app_providers.dart';
+
+class TopGradientWidget extends ConsumerWidget {
+  const TopGradientWidget({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = ref.watch(themeProvider);
+    return Align(
+      alignment: .topCenter,
+      child: Container(
+        height: 10,
+        width: .infinity,
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            colors: [theme.background00, theme.background],
+            begin: AlignmentDirectional(0.5, 1),
+            end: AlignmentDirectional(0.5, -1),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class BottomGradientWidget extends ConsumerWidget {
+  const BottomGradientWidget({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = ref.watch(themeProvider);
+    return Align(
+      alignment: .bottomCenter,
+      child: Container(
+        height: 30,
+        width: .infinity,
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            colors: [theme.background00, theme.background],
+            begin: AlignmentDirectional(0.5, -1),
+            end: AlignmentDirectional(0.5, 0.5),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// Used in accounts
+
+class ListTopGradient extends ConsumerWidget {
+  const ListTopGradient({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = ref.watch(themeProvider);
+    return Align(
+      alignment: .topCenter,
+      child: Container(
+        height: 20,
+        width: .infinity,
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            colors: [theme.backgroundDark00, theme.backgroundDark],
+            begin: const AlignmentDirectional(0.5, 1),
+            end: const AlignmentDirectional(0.5, -1),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class ListBottomGradient extends ConsumerWidget {
+  const ListBottomGradient({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = ref.watch(themeProvider);
+    return Align(
+      alignment: .bottomCenter,
+      child: Container(
+        height: 20,
+        width: .infinity,
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            colors: [theme.backgroundDark, theme.backgroundDark00],
+            begin: const AlignmentDirectional(0.5, 1),
+            end: const AlignmentDirectional(0.5, -1),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// Used in contacts
+
+class ContactListTopGradient extends ConsumerWidget {
+  const ContactListTopGradient({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = ref.watch(themeProvider);
+    return Align(
+      alignment: .topCenter,
+      child: Container(
+        height: 20,
+        width: .infinity,
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: AlignmentDirectional(0.5, -1),
+            end: AlignmentDirectional(0.5, 1),
+            colors: [theme.backgroundDark, theme.backgroundDark00],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class ContactListBottomGradient extends ConsumerWidget {
+  const ContactListBottomGradient({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = ref.watch(themeProvider);
+    return Align(
+      alignment: .bottomCenter,
+      child: Container(
+        height: 15,
+        width: .infinity,
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            colors: [theme.backgroundDark00, theme.backgroundDark],
+            begin: AlignmentDirectional(0.5, -1),
+            end: AlignmentDirectional(0.5, 1),
+          ),
+        ),
+      ),
+    );
+  }
+}

@@ -1,0 +1,333 @@
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_hooks/flutter_hooks.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
+
+import '../app_icons.dart';
+import '../app_providers.dart';
+import '../app_router.dart';
+import '../kaspa/utils.dart';
+import '../l10n/l10n.dart';
+import '../util/formatters.dart';
+import '../util/ui_util.dart';
+import '../util/user_data_util.dart';
+import '../widgets/app_text_field.dart';
+import '../widgets/content_wrapper.dart';
+import '../widgets/keyboard_widget.dart';
+import 'import_seed_options.dart';
+import 'intro_back_button.dart';
+import 'intro_providers.dart';
+import 'invalid_checksum_dialog.dart';
+import 'widgets/bip39_passphrase_button.dart';
+
+const kLegacyMnemonicLengths = [12];
+const kStandardMnemonicLengths = [12, 24];
+
+final _mnemonicProvider = StateProvider.autoDispose((ref) => '');
+
+final _mnemonicIsValidProvider =
+    Provider.autoDispose.family<bool, List<int>>((ref, allowedLengths) {
+  final mnemonic = ref.watch(_mnemonicProvider);
+  final trimmed = mnemonic.trim();
+  final length = trimmed.split(' ').length;
+  return mnemonic.endsWith(' ') &&
+      allowedLengths.contains(length) &&
+      isValidMnemonic(trimmed, verifyChecksum: false);
+});
+
+final _showInvalidChecksumProvider =
+    Provider.autoDispose.family<bool, List<int>>((ref, allowedLengths) {
+  final mnemonic = ref.watch(_mnemonicProvider).trim();
+  final isValid = ref.watch(_mnemonicIsValidProvider(allowedLengths));
+  final hasValidChecksum = isValidMnemonic(
+    mnemonic,
+    verifyChecksum: true,
+  );
+  return isValid && !hasValidChecksum;
+});
+
+class IntroImportSeed extends HookConsumerWidget {
+  final bool isLegacy;
+
+  const IntroImportSeed({super.key, this.isLegacy = false});
+
+  List<int> get allowedLengths =>
+      isLegacy ? kLegacyMnemonicLengths : kStandardMnemonicLengths;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = ref.watch(themeProvider);
+    final styles = ref.watch(stylesProvider);
+    final l10n = l10nOf(context);
+
+    final mnemonicIsValid = ref.watch(_mnemonicIsValidProvider(allowedLengths));
+
+    final mnemonicFocusNode = useFocusNode();
+    final mnemonicController = useTextEditingController();
+
+    void updateFocus(int offset) {
+      mnemonicController.selection = .collapsed(offset: offset);
+      mnemonicFocusNode.requestFocus();
+    }
+
+    ref.listen<String>(_mnemonicProvider, (previous, next) {
+      final keyboardNotifier = ref.read(keyboardEnabledProvider.notifier);
+      final words = next.trim().split(' ');
+      final wordsLength = isLegacy ? 12 : 24;
+      keyboardNotifier.state = words.length < wordsLength ||
+          (words.length == wordsLength && !isValidMnemonicWord(words.last));
+
+      mnemonicController.text = next;
+    });
+
+    ref.listen<String>(wordPrefixProvider, (_, prefix) {
+      final mnemonic = ref.read(_mnemonicProvider.notifier);
+
+      final text = mnemonic.state;
+      final index = text.lastIndexOf(' ');
+
+      mnemonic.state = text.substring(0, index + 1) + prefix;
+
+      if (prefix.length >= 3) {
+        final wordSuggestions = ref.read(wordSuggestionsProvider);
+        final suggestions = wordSuggestions.removeWhere(
+          (word) => !word.startsWith(prefix),
+        );
+        if (suggestions.length == 1 && suggestions.first == prefix) {
+          ref
+              .read(wordSelectedProvider.notifier)
+              .update((state) => Event(suggestions.first));
+          return;
+        }
+      }
+
+      final offset = mnemonic.state.length;
+      updateFocus(offset);
+    });
+
+    ref.listen<Event<String>>(wordSelectedProvider, (_, value) {
+      final mnemonic = ref.read(_mnemonicProvider.notifier);
+      final text = mnemonic.state;
+      final index = value.data.isEmpty
+          ? text.trim().lastIndexOf(' ')
+          : text.lastIndexOf(' ');
+      final word = value.data.isEmpty ? '' : '${value.data} ';
+      mnemonic.state = text.substring(0, index + 1) + word;
+
+      final offset = mnemonic.state.length;
+      updateFocus(offset);
+      ref.read(wordPrefixProvider.notifier).update((_) => '');
+    });
+
+    Future<void> scanQrCode() async {
+      final isValid = ref.read(_mnemonicIsValidProvider(allowedLengths));
+      if (isValid) {
+        return;
+      }
+      // Scan QR for mnemonic
+      final result = await UserDataUtil.scanQrCode(context);
+      if (result?.code == null) {
+        return;
+      }
+      final data = result!.code!.trim();
+      final mData = data.toLowerCase();
+      final length = mData.split(' ').length;
+      if (isValidMnemonic(mData, verifyChecksum: false) &&
+          allowedLengths.contains(length)) {
+        ref.read(_mnemonicProvider.notifier).state = '$mData ';
+        updateFocus(mData.length + 1);
+        ref.read(wordPrefixProvider.notifier).update((state) => '');
+        return;
+      }
+      UIUtil.showSnackbar(l10n.qrMnemonicError);
+    }
+
+    Future<void> pasteFromClipboard() async {
+      final isValid = ref.read(_mnemonicIsValidProvider(allowedLengths));
+      if (isValid) {
+        return;
+      }
+
+      final data = await Clipboard.getData(Clipboard.kTextPlain);
+      if (data == null || data.text == null) {
+        UIUtil.showSnackbar(l10n.clipboardEmpty);
+        return;
+      }
+      final text = data.text!.trim().toLowerCase();
+      final length = text.split(' ').length;
+      if (isValidMnemonic(text, verifyChecksum: false) &&
+          allowedLengths.contains(length)) {
+        final mnemonic = ref.read(_mnemonicProvider.notifier);
+        mnemonic.state = '$text ';
+        updateFocus(text.length + 1);
+        ref.read(wordPrefixProvider.notifier).update((state) => '');
+        return;
+      }
+      UIUtil.showSnackbar(l10n.pasteMnemonicError);
+    }
+
+    Future<void> submitMnemonic() async {
+      final mnemonic = ref.read(_mnemonicProvider).trim();
+      final intro = ref.read(introStateProvider.notifier);
+
+      final validChecksum = isValidMnemonic(mnemonic, verifyChecksum: true);
+
+      if (!validChecksum) {
+        final confirmed = await showDialog<bool>(
+          barrierColor: ref.read(themeProvider).barrier,
+          barrierDismissible: false,
+          context: context,
+          builder: (_) => const InvalidChecksumDialog(),
+        );
+
+        if (confirmed != true) {
+          return;
+        }
+      }
+
+      if (isValidMnemonic(mnemonic, verifyChecksum: false)) {
+        try {
+          intro.setMnemonic(mnemonic);
+        } catch (e) {
+          UIUtil.showSnackbar(l10n.somethingWentWrong);
+          if (!context.mounted) return;
+          appRouter.reload(context);
+        }
+      }
+    }
+
+    return ContentWrapper(
+      child: Column(
+        mainAxisSize: .min,
+        children: [
+          Expanded(
+            child: ListView(
+              shrinkWrap: true,
+              children: [
+                Padding(
+                  padding: const .symmetric(horizontal: 20),
+                  child: Row(
+                    mainAxisAlignment: .spaceBetween,
+                    children: [
+                      const IntroBackButton(),
+                      isLegacy
+                          ? const SizedBox()
+                          : const ImportSeedOptionsButton(),
+                    ],
+                  ),
+                ),
+                Container(
+                  margin: const .only(left: 40, right: 40, top: 10),
+                  alignment: AlignmentDirectional(-1, 0),
+                  child: FittedBox(
+                    fit: .scaleDown,
+                    child: Text(
+                      isLegacy
+                          ? l10n.importOptionLegacyWalletTitle
+                          : l10n.importOptionStandardWalletTitle,
+                      style: styles.textStyleHeaderColored,
+                      maxLines: 1,
+                    ),
+                  ),
+                ),
+                Container(
+                  margin: const .only(left: 40, right: 40, top: 15),
+                  alignment: .centerLeft,
+                  child: Text(
+                    isLegacy
+                        ? l10n.importSecretPhraseHintLegacy
+                        : l10n.importSecretPhraseHintCombo,
+                    style: styles.textStyleParagraph,
+                    textAlign: .start,
+                  ),
+                ),
+                Column(
+                  children: [
+                    Focus(
+                      onKeyEvent: (node, event) => .handled,
+                      child: AppTextField(
+                        leftMargin: 40,
+                        rightMargin: 40,
+                        topMargin: 20,
+                        focusNode: mnemonicFocusNode,
+                        controller: mnemonicController,
+                        inputFormatters: [
+                          SingleSpaceFormatter(),
+                          LowerCaseTextFormatter(),
+                          FilteringTextInputFormatter.allow(RegExp("[a-z ]")),
+                        ],
+                        textInputAction: .done,
+                        maxLines: null,
+                        autocorrect: false,
+                        autofocus: true,
+                        enableInteractiveSelection: false,
+                        prefixButton: TextFieldButton(
+                          icon: AppIcons.scan,
+                          onPressed: scanQrCode,
+                        ),
+                        fadePrefixOnCondition: true,
+                        prefixShowFirstCondition: !mnemonicIsValid,
+                        suffixButton: TextFieldButton(
+                          icon: AppIcons.paste,
+                          onPressed: pasteFromClipboard,
+                        ),
+                        fadeSuffixOnCondition: true,
+                        suffixShowFirstCondition: !mnemonicIsValid,
+                        keyboardType: .none,
+                        style: mnemonicIsValid
+                            ? styles.textStyleParagraphPrimaryNormal
+                            : styles.textStyleParagraphNormal,
+                      ),
+                    ),
+                    Consumer(
+                      builder: (context, ref, _) {
+                        final l10n = l10nOf(context);
+                        final showInvalidChecksum = ref.watch(
+                          _showInvalidChecksumProvider(allowedLengths),
+                        );
+                        final invalidChecksumText = showInvalidChecksum
+                            ? l10n.invalidChecksumMessage
+                            : '';
+                        return Container(
+                          alignment: const AlignmentDirectional(0, 0),
+                          margin: const .only(top: 6),
+                          child: Text(
+                            invalidChecksumText,
+                            style: styles.textStyleParagraphThinPrimary
+                                .copyWith(color: theme.success),
+                            textAlign: .center,
+                          ),
+                        );
+                      },
+                    ),
+                    if (!isLegacy) const Bip39PassphraseButton(),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          if (mnemonicIsValid)
+            Container(
+              alignment: .centerRight,
+              margin: const .directional(end: 12, top: 16, bottom: 8),
+              child: TextButton(
+                style: styles.appIconButtonStyle,
+                onPressed: submitMnemonic,
+                child: Icon(
+                  AppIcons.forward,
+                  color: theme.primary,
+                  size: 40,
+                ),
+              ),
+            )
+          else ...[
+            const SizedBox(height: 16),
+            const WordsWidget(),
+          ],
+          const SizedBox(height: 8),
+          const KeyboardWidget(),
+        ],
+      ),
+    );
+  }
+}

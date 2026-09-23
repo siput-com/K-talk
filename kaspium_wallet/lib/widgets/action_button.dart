@@ -1,0 +1,106 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import '../app_providers.dart';
+import '../l10n/l10n.dart';
+import '../receive/receive_sheet.dart';
+import '../send_sheet/send_sheet.dart';
+import 'sheet_util.dart';
+
+class ActionButton extends ConsumerWidget {
+  final String title;
+  final VoidCallback? onPressed;
+
+  const ActionButton({
+    super.key,
+    required this.title,
+    required this.onPressed,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = ref.watch(themeProvider);
+    final styles = ref.watch(stylesProvider);
+
+    return Container(
+      decoration: BoxDecoration(
+        borderRadius: .circular(100),
+        boxShadow: [theme.boxShadowButton],
+      ),
+      height: 55,
+      child: TextButton(
+        style: styles.primaryButtonStyle,
+        onPressed: onPressed,
+        child: FittedBox(
+          fit: .scaleDown,
+          child: Text(
+            title,
+            textAlign: .center,
+            style: styles.textStyleButtonPrimary,
+            maxLines: 1,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class ReceiveActionButton extends ConsumerWidget {
+  final VoidCallback? onPressed;
+
+  const ReceiveActionButton({
+    super.key,
+    this.onPressed,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = ref.watch(themeProvider);
+    final l10n = l10nOf(context);
+
+    return ActionButton(
+      title: l10n.receive,
+      onPressed: () {
+        onPressed?.call();
+        Sheets.showAppHeightNineSheet(
+          context: context,
+          widget: const ReceiveSheet(),
+          theme: theme,
+        );
+      },
+    );
+  }
+}
+
+class SendActionButton extends ConsumerWidget {
+  final VoidCallback? onPressed;
+
+  const SendActionButton({
+    super.key,
+    this.onPressed,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = ref.watch(themeProvider);
+    final l10n = l10nOf(context);
+
+    Future<void> sendAction() async {
+      if (onPressed != null) {
+        onPressed?.call();
+        return;
+      }
+
+      Sheets.showAppHeightNineSheet(
+        context: context,
+        widget: const SendSheet(),
+        theme: theme,
+      );
+    }
+
+    return ActionButton(
+      title: l10n.send,
+      onPressed: sendAction,
+    );
+  }
+}

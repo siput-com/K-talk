@@ -1,0 +1,28 @@
+// ignore_for_file: constant_identifier_names
+
+import 'package:flutter/material.dart';
+
+import '../l10n/l10n.dart';
+import 'setting_item.dart';
+
+enum NotificationOptions { ON, OFF }
+
+/// Represent notification on/off setting
+class NotificationSetting extends SettingSelectionItem {
+  final NotificationOptions setting;
+
+  const NotificationSetting(this.setting);
+
+  @override
+  String getDisplayName(BuildContext context) {
+    final l10n = l10nOf(context);
+
+    return switch (setting) {
+      .ON => l10n.on,
+      .OFF => l10n.off,
+    };
+  }
+
+  // For saving to shared prefs
+  String getId() => setting.name;
+}

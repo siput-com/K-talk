@@ -1,0 +1,186 @@
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_hooks/flutter_hooks.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
+
+import '../app_icons.dart';
+import '../app_providers.dart';
+import '../kaspa/kaspa.dart';
+import '../l10n/l10n.dart';
+import '../util/ui_util.dart';
+import '../util/user_data_util.dart';
+import '../widgets/action_buttons_wrapper.dart';
+import '../widgets/app_text_field.dart';
+import '../widgets/buttons.dart';
+import '../widgets/content_wrapper.dart';
+import 'intro_back_button.dart';
+import 'intro_providers.dart';
+
+bool isValidKpub(String kpub) {
+  try {
+    final _ = HdWalletViewSchnorr(convertIfXpub(kpub));
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+class IntroImportKpub extends HookConsumerWidget {
+  const IntroImportKpub({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final styles = ref.watch(stylesProvider);
+    final l10n = l10nOf(context);
+
+    final kpubFocusNode = useFocusNode();
+    final kpubController = useTextEditingController();
+
+    final update = useValueListenable(kpubController);
+
+    final kpubIsValid = useMemoized(
+      () => isValidKpub(update.text),
+      [update],
+    );
+
+    final showInvalidMessage = update.text.isNotEmpty && !kpubIsValid;
+
+    Future<void> scanQrCode() async {
+      if (kpubIsValid) {
+        return;
+      }
+      final result = await UserDataUtil.scanQrCode(context);
+      final code = result?.code;
+      if (code == null) {
+        return;
+      }
+      final kpub = code.trim();
+      if (isValidKpub(kpub)) {
+        kpubController.text = kpub;
+        return;
+      }
+      UIUtil.showSnackbar(l10n.importKpubQrCodeError);
+    }
+
+    Future<void> pasteFromClipboard() async {
+      if (kpubIsValid) {
+        return;
+      }
+
+      final data = await Clipboard.getData(Clipboard.kTextPlain);
+      if (data == null || data.text == null) {
+        UIUtil.showSnackbar(l10n.clipboardEmpty);
+        return;
+      }
+      final text = data.text!.trim();
+      if (isValidKpub(text)) {
+        kpubController.text = text;
+        return;
+      }
+      UIUtil.showSnackbar(l10n.importKpubClipboardError);
+    }
+
+    void submitKpub() {
+      final kpub = convertIfXpub(kpubController.text.trim());
+      final intro = ref.read(introStateProvider.notifier);
+
+      if (isValidKpub(kpub)) {
+        intro.setKpub(kpub);
+      }
+    }
+
+    return ContentWrapper(
+      child: Column(
+        mainAxisSize: .min,
+        children: [
+          Expanded(
+            child: ListView(
+              shrinkWrap: true,
+              children: [
+                Align(
+                  alignment: .centerLeft,
+                  child: Padding(
+                    padding: const .directional(start: 20),
+                    child: const IntroBackButton(),
+                  ),
+                ),
+                Container(
+                  margin: const .only(left: 40, right: 40, top: 10),
+                  alignment: AlignmentDirectional(-1, 0),
+                  child: FittedBox(
+                    fit: .scaleDown,
+                    child: Text(
+                      l10n.importKpub,
+                      style: styles.textStyleHeaderColored,
+                      maxLines: 1,
+                    ),
+                  ),
+                ),
+                Container(
+                  margin: const .only(left: 40, right: 40, top: 15),
+                  alignment: .centerLeft,
+                  child: Text(
+                    l10n.importKpubHint,
+                    style: styles.textStyleParagraph,
+                    textAlign: .start,
+                  ),
+                ),
+                Column(
+                  children: [
+                    AppTextField(
+                      leftMargin: 40,
+                      rightMargin: 40,
+                      topMargin: 20,
+                      focusNode: kpubFocusNode,
+                      controller: kpubController,
+                      inputFormatters: [
+                        LengthLimitingTextInputFormatter(128),
+                        FilteringTextInputFormatter.allow(
+                          RegExp("[a-km-zA-HJ-NP-Z1-9]"),
+                        ),
+                      ],
+                      textInputAction: .next,
+                      maxLines: null,
+                      autocorrect: false,
+                      autofocus: true,
+                      prefixButton: TextFieldButton(
+                        icon: AppIcons.scan,
+                        onPressed: scanQrCode,
+                      ),
+                      fadePrefixOnCondition: true,
+                      prefixShowFirstCondition: !kpubIsValid,
+                      suffixButton: TextFieldButton(
+                        icon: AppIcons.paste,
+                        onPressed: pasteFromClipboard,
+                      ),
+                      fadeSuffixOnCondition: true,
+                      suffixShowFirstCondition: !kpubIsValid,
+                      keyboardType: .text,
+                      style: kpubIsValid
+                          ? styles.textStyleParagraphPrimaryNormal
+                          : styles.textStyleParagraphNormal,
+                    ),
+                    Container(
+                      alignment: const AlignmentDirectional(0, 0),
+                      padding: const .symmetric(vertical: 6, horizontal: 40),
+                      child: Text(
+                        showInvalidMessage ? l10n.invalidKpubMessage : '',
+                        style: styles.textStyleParagraphThinSuccess,
+                        textAlign: .center,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          ActionButtonsWrapper(
+            buttons: [
+              PrimaryButton(title: l10n.nextButton, onPressed: submitKpub),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}

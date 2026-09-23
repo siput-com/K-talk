@@ -1,0 +1,69 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_hooks/flutter_hooks.dart';
+import 'package:flutter_portal/flutter_portal.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
+
+import '../app_providers.dart';
+import '../util/platform.dart';
+import 'privacy_overlay.dart';
+
+class PrivacyScreen extends HookConsumerWidget {
+  final Widget child;
+  const PrivacyScreen({
+    super.key,
+    required this.child,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final disabled = ref.watch(privacyOverlayDisabledProvider);
+    final inactive = useState(false);
+
+    useEffect(() {
+      Future.microtask(() {
+        if (!context.mounted) return;
+        precacheImage(AssetImage('assets/kaspa.png'), context);
+      });
+      return null;
+    }, const []);
+
+    useEffect(() {
+      if (inactive.value) {
+        Future.microtask(() => FocusManager.instance.primaryFocus?.unfocus());
+      }
+      return null;
+    }, [inactive.value]);
+
+    useOnAppLifecycleStateChange((_, state) {
+      switch (state) {
+        case .detached:
+          break;
+        case .resumed:
+          inactive.value = false;
+          ref.read(privacyOverlayDisabledProvider.notifier).state = false;
+          break;
+        case .inactive:
+          if (kInDebugMode && kPlatformIsMacOS) {
+            break;
+          }
+          inactive.value = true;
+          break;
+        case .hidden:
+          break;
+        case .paused:
+          break;
+      }
+    });
+
+    return Portal(
+      child: Directionality(
+        textDirection: TextDirection.ltr,
+        child: PortalTarget(
+          visible: inactive.value && !disabled,
+          portalFollower: const PrivacyOverlay(),
+          child: child,
+        ),
+      ),
+    );
+  }
+}

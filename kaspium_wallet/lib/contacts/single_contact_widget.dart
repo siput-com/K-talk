@@ -1,0 +1,88 @@
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import '../app_providers.dart';
+import '../l10n/l10n.dart';
+import '../util/ui_util.dart';
+import '../widgets/address_widgets.dart';
+import '../widgets/app_icon_button.dart';
+import '../widgets/sheet_util.dart';
+import 'contact.dart';
+import 'contact_details.dart';
+
+class SingleContactWidget extends ConsumerWidget {
+  final Contact contact;
+
+  const SingleContactWidget({
+    super.key,
+    required this.contact,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = ref.watch(themeProvider);
+    final styles = ref.watch(stylesProvider);
+
+    void showDetails() {
+      Sheets.showAppHeightNineSheet(
+        context: context,
+        theme: theme,
+        widget: ContactDetails(contact: contact),
+      );
+    }
+
+    Future<void> copyAddress() async {
+      final l10n = l10nOf(context);
+      final message = l10n.contactAddressCopied(contact.address);
+
+      await Clipboard.setData(ClipboardData(text: contact.address));
+
+      UIUtil.showSnackbar(message);
+    }
+
+    return TextButton(
+      style: styles.defaultTextButtonStyle,
+      onPressed: showDetails,
+      child: Column(
+        crossAxisAlignment: .stretch,
+        children: [
+          Container(
+            padding: const .symmetric(vertical: 8),
+            margin: const .directional(start: 20, end: 12),
+            child: Row(
+              mainAxisAlignment: .spaceBetween,
+              children: [
+                Flexible(
+                  child: SizedBox(
+                    height: 80,
+                    child: FittedBox(
+                      fit: .scaleDown,
+                      child: Column(
+                        mainAxisAlignment: .center,
+                        crossAxisAlignment: .start,
+                        children: [
+                          Text(
+                            contact.name,
+                            style: styles.textStyleSettingItemHeader,
+                          ),
+                          AddressTwoLineText(address: contact.address),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+                Center(
+                  child: AppIconButton(
+                    icon: Icons.copy,
+                    onPressed: copyAddress,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}

@@ -1,0 +1,99 @@
+import 'package:auto_size_text/auto_size_text.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import '../app_icons.dart';
+import '../app_providers.dart';
+import '../l10n/l10n.dart';
+import '../widgets/action_buttons_wrapper.dart';
+import '../widgets/buttons.dart';
+import '../widgets/content_wrapper.dart';
+import 'intro_back_button.dart';
+import 'intro_providers.dart';
+
+class IntroBackupSafety extends ConsumerWidget {
+  const IntroBackupSafety({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = ref.watch(themeProvider);
+    final styles = ref.watch(stylesProvider);
+    final l10n = l10nOf(context);
+
+    void goNext() {
+      final intro = ref.read(introStateProvider.notifier);
+      intro.showIntroBackup();
+    }
+
+    return ContentWrapper(
+      child: Column(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: .start,
+              children: [
+                Row(
+                  children: [
+                    Padding(
+                      padding: .directional(start: 20),
+                      child: const IntroBackButton(),
+                    ),
+                  ],
+                ),
+                Container(
+                  margin: const .directional(start: 40, top: 15),
+                  child: Icon(
+                    AppIcons.security,
+                    size: 60,
+                    color: theme.primary,
+                  ),
+                ),
+                // The header
+                Container(
+                  margin: const .only(left: 40, right: 40, top: 10),
+                  alignment: AlignmentDirectional(-1, 0),
+                  child: AutoSizeText(
+                    l10n.secretInfoHeader,
+                    style: styles.textStyleHeaderColored,
+                    stepGranularity: 0.1,
+                    maxLines: 1,
+                    minFontSize: 12,
+                  ),
+                ),
+                // The paragraph
+                Container(
+                  margin: const .only(left: 40, right: 40, top: 15),
+                  alignment: .centerStart,
+                  child: Column(
+                    children: [
+                      AutoSizeText(
+                        l10n.secretInfo,
+                        style: styles.textStyleParagraph,
+                        maxLines: 5,
+                        stepGranularity: 0.5,
+                      ),
+                      Container(
+                        margin: const .only(top: 15),
+                        child: AutoSizeText(
+                          l10n.secretWarning,
+                          style: styles.textStyleParagraphPrimary,
+                          maxLines: 4,
+                          stepGranularity: 0.5,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          ActionButtonsWrapper(
+            buttons: [
+              PrimaryButton(title: l10n.gotItButton, onPressed: goNext),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}

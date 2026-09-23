@@ -1,0 +1,144 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import '../app_providers.dart';
+import '../l10n/l10n.dart';
+import '../widgets/action_buttons_wrapper.dart';
+import '../widgets/buttons.dart';
+import '../widgets/content_wrapper.dart';
+import 'intro_back_button.dart';
+import 'intro_providers.dart';
+
+class ImportWalletTypeCard extends ConsumerWidget {
+  final String title;
+  final String description;
+  final VoidCallback onPressed;
+
+  const ImportWalletTypeCard({
+    super.key,
+    required this.title,
+    required this.description,
+    required this.onPressed,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = ref.watch(themeProvider);
+    final styles = ref.watch(stylesProvider);
+
+    return Padding(
+      padding: const .symmetric(
+        vertical: 6,
+        horizontal: 28,
+      ),
+      child: TextButton(
+        style: styles.darkCardButtonStyle,
+        onPressed: onPressed,
+        child: Padding(
+          padding: const .symmetric(vertical: 14, horizontal: 12),
+          child: Column(
+            crossAxisAlignment: .stretch,
+            children: [
+              Text(
+                title,
+                style: styles.textStyleAccount.copyWith(color: theme.text),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                description,
+                style: styles.textStyleSettingItemSubheader,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class IntroImportSelect extends ConsumerWidget {
+  const IntroImportSelect({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final styles = ref.watch(stylesProvider);
+    final l10n = l10nOf(context);
+
+    void importWallet() {
+      final notifier = ref.read(introStateProvider.notifier);
+      notifier.importWallet();
+    }
+
+    void importLegacyWallet() {
+      final notifier = ref.read(introStateProvider.notifier);
+      notifier.importLegacyWallet();
+    }
+
+    void importViewOnlyWallet() {
+      final notifier = ref.read(introStateProvider.notifier);
+      notifier.importViewOnlyWallet();
+    }
+
+    void goBack() {
+      final intro = ref.read(introStateProvider.notifier);
+      intro.goBack();
+    }
+
+    return ContentWrapper(
+      child: Column(
+        crossAxisAlignment: .stretch,
+        children: [
+          Align(
+            alignment: .centerLeft,
+            child: Padding(
+              padding: const .directional(start: 20),
+              child: const IntroBackButton(),
+            ),
+          ),
+          Container(
+            margin: const .only(left: 40, right: 40, top: 10),
+            alignment: AlignmentDirectional(-1, 0),
+            child: FittedBox(
+              fit: .scaleDown,
+              child: Text(
+                l10n.importWallet,
+                style: styles.textStyleHeaderColored,
+                maxLines: 1,
+              ),
+            ),
+          ),
+          Container(
+            margin: const .only(left: 40, right: 40, top: 15),
+            alignment: .centerLeft,
+            child: Text(
+              l10n.importWalletDescription,
+              style: styles.textStyleParagraph,
+              textAlign: .start,
+            ),
+          ),
+          ImportWalletTypeCard(
+            title: l10n.importOptionStandardWalletTitle,
+            description: l10n.importOptionStandardWalletDescription,
+            onPressed: importWallet,
+          ),
+          ImportWalletTypeCard(
+            title: l10n.importOptionLegacyWalletTitle,
+            description: l10n.importOptionLegacyWalletDescription,
+            onPressed: importLegacyWallet,
+          ),
+          ImportWalletTypeCard(
+            title: l10n.importOptionKpubTitle,
+            description: l10n.importOptionKpubDescription,
+            onPressed: importViewOnlyWallet,
+          ),
+          Expanded(child: SizedBox()),
+          ActionButtonsWrapper(
+            buttons: [
+              PrimaryButton(title: l10n.goBackButton, onPressed: goBack),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}

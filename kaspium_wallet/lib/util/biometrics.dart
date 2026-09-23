@@ -1,0 +1,35 @@
+import 'package:local_auth/local_auth.dart';
+
+import 'config.dart';
+
+class BiometricUtil {
+  final localAuth = LocalAuthentication();
+  BiometricUtil();
+
+  Future<bool> hasBiometrics() async {
+    if (!kCheckBiometrics) {
+      return false;
+    }
+    final canCheck = await localAuth.canCheckBiometrics;
+    if (canCheck) {
+      final availableBiometrics = await localAuth.getAvailableBiometrics();
+      return availableBiometrics.any(
+        (type) => type == .face || type == .fingerprint || type == .strong,
+      );
+    }
+    return false;
+  }
+
+  Future<bool> authenticateWithBiometrics(String message) async {
+    bool hasBiometricsEnrolled = await hasBiometrics();
+    if (!hasBiometricsEnrolled) {
+      throw Exception('Missing biometrics');
+    }
+
+    return localAuth.authenticate(
+      localizedReason: message,
+      biometricOnly: true,
+      sensitiveTransaction: true,
+    );
+  }
+}

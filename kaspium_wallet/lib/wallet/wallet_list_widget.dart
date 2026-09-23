@@ -1,0 +1,32 @@
+import 'package:fast_immutable_collections/fast_immutable_collections.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import '../widgets/scrollable_wrapper.dart';
+import 'wallet_card.dart';
+import 'wallet_providers.dart';
+
+class WalletListWidget extends ConsumerWidget {
+  const WalletListWidget({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final wallets = ref.watch(walletsProvider) ?? IList([]);
+
+    return ScrollableWrapper(
+      child: ListView.builder(
+        padding: const .only(top: 12, bottom: 16),
+        itemCount: wallets.length,
+        itemBuilder: (context, index) {
+          final item = wallets[index];
+          return ProviderScope(
+            overrides: [
+              walletItemProvider.overrideWithValue(item),
+            ],
+            child: const WalletCard(),
+          );
+        },
+      ),
+    );
+  }
+}

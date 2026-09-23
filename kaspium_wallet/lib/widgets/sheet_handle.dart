@@ -1,0 +1,22 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import '../app_providers.dart';
+
+class SheetHandle extends ConsumerWidget {
+  const SheetHandle({super.key});
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = ref.watch(themeProvider);
+
+    return Container(
+      margin: const .only(top: 10),
+      height: 5,
+      width: 64,
+      decoration: BoxDecoration(
+        color: theme.text10,
+        borderRadius: .circular(100),
+      ),
+    );
+  }
+}

@@ -1,0 +1,61 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import '../app_providers.dart';
+import '../kaspa/utils.dart';
+import 'utxo_card.dart';
+import 'utxos_compound_card.dart';
+import 'utxos_empty_card.dart';
+
+class UtxosWidget extends ConsumerWidget {
+  const UtxosWidget({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = ref.watch(themeProvider);
+
+    final utxoList = ref.watch(utxoListProvider);
+    final showCompoundCard = ref.watch(
+      spendableUtxosProvider.select(
+        (utxos) => utxos.length > kMaxInputsPerTransaction,
+      ),
+    );
+
+    Future<void> refresh() async {
+      ref.read(hapticUtilProvider).success();
+
+      final networkError = ref.read(networkErrorProvider);
+      if (networkError) {
+        ref.invalidate(kaspaRpcProvider);
+      }
+
+      final addresses = ref.read(activeAddressesProvider);
+      final notifier = ref.read(utxoNotifierProvider);
+      await notifier.refresh(addresses: addresses);
+    }
+
+    return RefreshIndicator(
+      color: theme.primary,
+      backgroundColor: theme.backgroundDark,
+      onRefresh: refresh,
+      child: utxoList.isEmpty
+          ? ListView(
+              padding: const .fromSTEB(0, 5, 0, 15),
+              children: const [UtxosEmptyCard()],
+            )
+          : ListView.builder(
+              key: const PageStorageKey('utxo-list'),
+              padding: const .only(top: 6, bottom: 28),
+              itemCount: utxoList.length + (showCompoundCard ? 1 : 0),
+              itemBuilder: (context, index) {
+                if (showCompoundCard) {
+                  if (index == 0) return const UtxosCompoundCard();
+                  index -= 1;
+                }
+                final item = utxoList[index];
+                return UtxoCard(item: item);
+              },
+            ),
+    );
+  }
+}
